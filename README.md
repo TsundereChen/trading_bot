@@ -65,10 +65,26 @@ Starting multiple pairs is all-or-nothing after revalidation. Closing multiple p
 ```sh
 BOT_URL=http://127.0.0.1:8080 ./trader exporter   # Prometheus scrapes 9091, not the API
 ./trader backtest --input history.json             # or POST to /api/backtest
-cp .env.example .env && chmod 600 .env && podman compose up --build -d
+cp .env.example .env && chmod 600 .env
+# Generate the secrets in .env before running:
+podman compose pull
+podman compose up -d
 ```
 
 Compose runs bot, PostgreSQL, and exporter. Import `grafana-dashboard.json`; metrics carry a `pair` label. Backtests are rule-only over historical candles with slippage and fees, and do not replay live timing or spreads.
+
+CI builds and publishes `ghcr.io/tsunderechen/trading_bot` after the Go checks
+pass on `main` (pushes or manual runs). Images are tagged `latest` and
+`sha-<full commit SHA>`; pull-request builds do not log in or publish.
+Publishing uses the workflow's `GITHUB_TOKEN` with `packages: write`, so no
+additional registry secret is required.
+
+Compose pulls the GHCR image for both bot and exporter instead of building
+locally. Override `TRADER_IMAGE` in `.env` to pin a commit tag or image digest.
+The image must be published before the first deployment. For a private GHCR
+package, run `podman login ghcr.io` with a token permitted to read the package;
+otherwise make the package public in GitHub's package settings for anonymous
+pulls. The workflow does not change package visibility.
 
 Generate the control/metrics secrets and PostgreSQL password in `.env` before starting Compose. Audit retention defaults to 30 days and 100,000 events (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_EVENTS`). Pruning runs in batches of at most 1,000 rows each minute, so catch-up is gradual; current positions and order/native-stop intents are never pruned. Export audit records separately if longer retention is required. Database files may retain their high-water size until offline maintenance.
 

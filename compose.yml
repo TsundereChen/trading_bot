@@ -15,10 +15,8 @@ services:
     restart: unless-stopped
 
   bot:
-    build:
-      context: .
-      dockerfile: Containerfile
-    image: ${TRADER_IMAGE:-localhost/automated-trader:latest}
+    image: ${TRADER_IMAGE:-ghcr.io/tsunderechen/trading_bot:latest}
+    pull_policy: always
     environment:
       # libpq keyword DSN avoids URL-encoding the password. See .env.example.
       DATABASE_URL: "host=postgres port=5432 dbname=trader user=trader password='${POSTGRES_PASSWORD}' sslmode=disable"
@@ -53,10 +51,8 @@ services:
     restart: unless-stopped
 
   exporter:
-    build:
-      context: .
-      dockerfile: Containerfile
-    image: ${TRADER_IMAGE:-localhost/automated-trader:latest}
+    image: ${TRADER_IMAGE:-ghcr.io/tsunderechen/trading_bot:latest}
+    pull_policy: always
     command: ["exporter"]
     environment:
       BOT_URL: http://bot:8080
