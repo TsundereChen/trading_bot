@@ -62,11 +62,20 @@ func validateCandle(c Candle) error {
 	}
 	return nil
 }
+
+// Reject oversized coefficients/exponents before comparisons can expand a
+// tiny JSON decimal into an enormous allocation.
+func boundedDecimal(d decimal.Decimal) bool {
+	return d.Exponent() >= -18 && d.Exponent() <= 18 && d.Coefficient().BitLen() <= 128
+}
 func backtestDefaults(input BacktestInput) (BacktestInput, error) {
 	for _, v := range []struct {
 		dst *decimal.Decimal
 		def string
 	}{{&input.Budget, "1000"}, {&input.MaxPosition, "100"}, {&input.RiskPerTrade, "2.5"}, {&input.DailyLoss, "10"}, {&input.QuantityStep, "0.00000001"}, {&input.MinNotional, "5"}} {
+		if !boundedDecimal(*v.dst) {
+			return input, fmt.Errorf("backtest decimals exceed numeric limits")
+		}
 		if v.dst.IsZero() {
 			*v.dst = decimal.RequireFromString(v.def)
 		}

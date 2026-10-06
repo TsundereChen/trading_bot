@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -15,6 +16,7 @@ import (
 var postgresMigrations embed.FS
 
 type Postgres struct {
+	mu    sync.Mutex // One leased SQL session: never interleave operations inside a transaction.
 	db    *sql.DB
 	lease *sql.Conn
 }
@@ -67,6 +69,9 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		}
 	}
 	if err == nil {
+		_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS events_time_id ON events(time,id)`)
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
@@ -80,6 +85,8 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 // Use the lease connection for every operation: losing its lock also loses the
 // ability to commit, rather than continuing writes on another pooled connection.
 func (p *Postgres) Load(ctx context.Context) (State, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var state State
 	var payload string
 	err := p.lease.QueryRowContext(ctx, `SELECT payload FROM bot_state WHERE id=1`).Scan(&payload)
@@ -101,6 +108,8 @@ func (p *Postgres) Commit(ctx context.Context, state State, kind string, data an
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	tx, err := p.lease.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -115,6 +124,8 @@ func (p *Postgres) Commit(ctx context.Context, state State, kind string, data an
 	return tx.Commit()
 }
 func (p *Postgres) Events(ctx context.Context) ([]Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	rows, err := p.lease.QueryContext(ctx, `SELECT id,time,kind,payload FROM events ORDER BY id DESC LIMIT 100`)
 	if err != nil {
 		return nil, err
@@ -132,7 +143,21 @@ func (p *Postgres) Events(ctx context.Context) ([]Event, error) {
 	}
 	return events, rows.Err()
 }
+func (p *Postgres) Prune(ctx context.Context, cutoff time.Time, keep int) error {
+	if keep < 1 {
+		return fmt.Errorf("audit retention count must be positive")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, err := p.lease.ExecContext(ctx, `DELETE FROM events WHERE id IN (
+		SELECT id FROM events WHERE time < $1
+		OR id < COALESCE((SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET $2),0)
+		ORDER BY id LIMIT 1000)`, cutoff.UTC().Format(time.RFC3339Nano), keep-1)
+	return err
+}
 func (p *Postgres) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = p.lease.ExecContext(ctx, `SELECT pg_advisory_unlock(741930281)`)

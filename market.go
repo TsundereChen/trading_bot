@@ -25,6 +25,9 @@ type Market struct {
 	connected  bool
 	reconnects uint64
 	lastError  string
+	removed    bool
+	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
 type MarketSnapshot struct {
@@ -49,7 +52,7 @@ type Feeds struct {
 func NewFeeds(pairs []string) *Feeds {
 	f := &Feeds{markets: map[string]*Market{}, pairs: append([]string(nil), pairs...)}
 	for _, pair := range pairs {
-		f.markets[pair] = &Market{pair: pair}
+		f.markets[pair] = &Market{pair: pair, done: make(chan struct{})}
 	}
 	return f
 }
@@ -90,12 +93,19 @@ func (f *Feeds) SetPairs(pairs []string) {
 	for _, pair := range pairs {
 		wanted[pair] = true
 		if _, ok := f.markets[pair]; !ok {
-			f.markets[pair] = &Market{pair: pair}
+			f.markets[pair] = &Market{pair: pair, done: make(chan struct{})}
 		}
 	}
 	for pair, market := range f.markets {
 		if !wanted[pair] {
 			market.mu.Lock()
+			market.removed = true
+			if market.cancel != nil {
+				market.cancel()
+			}
+			if market.done != nil {
+				close(market.done)
+			}
 			market.connected = false
 			market.quoteAt = time.Time{}
 			market.candles = nil
@@ -151,6 +161,9 @@ func (m *Market) message(pair string, payload []byte) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.removed {
+		return context.Canceled
+	}
 	if event.Symbol != m.pair || pair != m.pair {
 		return fmt.Errorf("stream pair mismatch: frame %s, session %s, feed %s", event.Symbol, pair, m.pair)
 	}
@@ -198,6 +211,16 @@ func (m *Market) message(pair string, payload []byte) error {
 }
 
 func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	if m.removed {
+		m.mu.Unlock()
+		cancel()
+		return context.Canceled
+	}
+	m.cancel = cancel
+	m.mu.Unlock()
+	defer func() { cancel(); m.mu.Lock(); m.cancel = nil; m.mu.Unlock() }()
 	// Connect before the REST bootstrap so buffered stream candles cover the
 	// race window between the snapshot and the subscription going live.
 	dialer := websocket.Dialer{HandshakeTimeout: 8 * time.Second}
@@ -224,7 +247,7 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 		return err
 	}
 	m.mu.Lock()
-	if m.pair != pair {
+	if m.pair != pair || m.removed {
 		m.mu.Unlock()
 		return nil
 	}
@@ -247,9 +270,9 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 				return
 			case <-ticker.C:
 				m.mu.RLock()
-				current := m.pair
+				current, removed := m.pair, m.removed
 				m.mu.RUnlock()
-				if current != pair {
+				if current != pair || removed {
 					conn.Close()
 					return
 				}
@@ -320,12 +343,18 @@ func (f *Feeds) Run(ctx context.Context, b *Binance) {
 }
 
 func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
+	f.mu.RLock()
+	market := f.markets[pair]
+	f.mu.RUnlock()
+	if market == nil {
+		return
+	}
 	backoff := time.Second
 	for ctx.Err() == nil {
 		f.mu.RLock()
-		market, ok := f.markets[pair]
+		current := f.markets[pair]
 		f.mu.RUnlock()
-		if !ok {
+		if current != market {
 			return // pair removed
 		}
 		stream := strings.ToLower(pair)
@@ -345,6 +374,8 @@ func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
 		}
 		select {
 		case <-ctx.Done():
+			return
+		case <-market.done:
 			return
 		case <-time.After(backoff):
 		}

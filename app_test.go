@@ -34,9 +34,10 @@ func testApp(t *testing.T) *App {
 	t.Cleanup(func() { repo.Close() })
 	a := &App{
 		repo:          repo,
-		cfg:           Config{ControlToken: strings.Repeat("a", 24), MetricsToken: strings.Repeat("m", 24), MaxPosition: dec("100"), RiskPerTrade: dec("2.5"), DailyLoss: dec("10"), MaxPairs: 8, PerPairBudget: dec("1000"), Venue: paper()},
-		state:         State{Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Paused: true, Cash: dec("1000")}}},
-		symbols:       map[string]Symbol{"BTCUSDT": {Symbol: "BTCUSDT", Base: "BTC", Quote: "USDT", Step: dec("0.001"), MinQty: dec("0.001"), MinNotional: dec("5")}},
+		cfg:           Config{ControlToken: strings.Repeat("a", 24), MetricsToken: strings.Repeat("m", 24), MaxPosition: dec("100"), RiskPerTrade: dec("2.5"), DailyLoss: dec("10"), MaxPairs: 8, PerPairBudget: dec("1000"), Venue: paper(), AuditDays: 30, AuditMaxEvents: 100000},
+		state:         State{Venue: "paper", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Paused: true, Cash: dec("1000")}}},
+		accountID:     "42",
+		symbols:       map[string]Symbol{"BTCUSDT": {Symbol: "BTCUSDT", Base: "BTC", Quote: "USDT", Step: dec("0.001"), MinQty: dec("0.001"), MinNotional: dec("5"), Tick: dec("0.01"), StopAllowed: true}},
 		feeds:         NewFeeds([]string{"BTCUSDT"}),
 		lastDecisions: map[string]any{},
 		metrics:       newMetrics(prometheus.NewRegistry()),
@@ -75,11 +76,11 @@ func TestOrderAccountingIdempotentAndFees(t *testing.T) {
 	a := testApp(t)
 	a.state.Pairs["BTCUSDT"].Pending = &Pending{ID: "buy", Side: "BUY", Qty: dec("1")}
 	a.binance = &Binance{venue: paper(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
-		return response(`[{"commission":"0.001","commissionAsset":"BTC"}]`), nil
+		return response(`[{"id":1,"orderId":1,"qty":"1","quoteQty":"100","commission":"0.001","commissionAsset":"BTC"}]`), nil
 	})}}
 	o := Order{OrderID: 1, ClientID: "buy", Status: "PARTIALLY_FILLED", Executed: "1", Quote: "100"}
 	for i := 0; i < 2; i++ {
-		if err := a.applyOrderLocked(context.Background(), "BTCUSDT", o); err != nil {
+		if err := a.applyOrder(context.Background(), "BTCUSDT", o, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,7 +89,7 @@ func TestOrderAccountingIdempotentAndFees(t *testing.T) {
 		t.Fatalf("duplicate accounting or missing fees: %+v", p)
 	}
 	o.Status = "FILLED"
-	if err := a.applyOrderLocked(context.Background(), "BTCUSDT", o); err != nil {
+	if err := a.applyOrder(context.Background(), "BTCUSDT", o, false); err != nil {
 		t.Fatal(err)
 	}
 	if a.state.Pairs["BTCUSDT"].Pending != nil {
@@ -100,6 +101,7 @@ func TestSubmissionPersistsBeforeNetworkAndNeverRetries(t *testing.T) {
 	a := testApp(t)
 	a.cfg.Trading = true
 	a.state.Pairs["BTCUSDT"].Paused = false
+	a.state.Pairs["BTCUSDT"].Stop = dec("99")
 	orders := 0
 	a.binance = &Binance{venue: paper(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
@@ -115,13 +117,13 @@ func TestSubmissionPersistsBeforeNetworkAndNeverRetries(t *testing.T) {
 		}
 		return nil, fmt.Errorf("unexpected request")
 	})}}
-	if a.submitLocked(context.Background(), "BTCUSDT", "BUY", dec("1"), "test") == nil {
+	if a.submitLocked(context.Background(), "BTCUSDT", "BUY", dec("0.9"), "test") == nil {
 		t.Fatal("expected uncertain submission")
 	}
 	if a.state.Pairs["BTCUSDT"].Pending == nil {
 		t.Fatal("uncertain intent discarded")
 	}
-	if a.submitLocked(context.Background(), "BTCUSDT", "BUY", dec("1"), "test") == nil {
+	if a.submitLocked(context.Background(), "BTCUSDT", "BUY", dec("0.9"), "test") == nil {
 		t.Fatal("duplicate allowed")
 	}
 	if orders != 1 {
@@ -291,12 +293,13 @@ func TestProtectiveExitWhilePaused(t *testing.T) {
 			}
 			return response(fmt.Sprintf(`{"orderId":1,"clientOrderId":%q,"status":"FILLED","executedQty":"1","cummulativeQuoteQty":"90"}`, r.URL.Query().Get("newClientOrderId"))), nil
 		case "/api/v3/myTrades":
-			return response(`[{"commission":"0.1","commissionAsset":"USDT"}]`), nil
+			return response(`[{"id":1,"orderId":1,"qty":"1","quoteQty":"90","commission":"0.1","commissionAsset":"USDT"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected path %s", r.URL.Path)
 		}
 	})}}
 	a.poll(context.Background())
+	p = a.snapshot().Pairs["BTCUSDT"]
 	if orders != 1 || !p.Qty.IsZero() || !p.Cash.Equal(dec("989.9")) || !p.Paused {
 		t.Fatalf("protective exit failed: %+v", p)
 	}

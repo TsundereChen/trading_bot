@@ -11,7 +11,7 @@ export OLLAYA_URL="http://$OLLAYA_HOST:11435" TRADING_PAIRS=BTCUSDT,ETHUSDT
 ./trader
 ```
 
-Startup is paused and no frontend exists; control it over HTTP. See `.env.example` for all settings.
+Requires Go 1.26.8 or newer. Startup is paused and no frontend exists; control it over HTTP. See `.env.example` for all settings. Replace example secret placeholders before running; they are rejected.
 
 | Setting | Effect |
 |---|---|
@@ -21,15 +21,29 @@ Startup is paused and no frontend exists; control it over HTTP. See `.env.exampl
 | `BINANCE_API_KEY` / `_SECRET` | Required when trading is enabled |
 | `DATABASE_URL` unset | SQLite; set it for PostgreSQL |
 
+SQLite permits one bot owner per database on Unix; use a filesystem `DATABASE_PATH`, not a SQLite URI/DSN. Use PostgreSQL on other platforms; it also enforces a singleton lease. Do not run independent databases/bots against the same trading allocation: these leases protect a database, not the entire Binance account.
+
+### State identity and existing databases
+
+State is bound to the venue and, when execution is enabled, the Binance account UID returned by `/api/v3/account`. Known mismatches stop startup; use separate databases for testnet/live and different accounts. Missing account UIDs fail closed.
+
+Older databases have no identity metadata and are **not automatically adopted**. Back up the database, verify its original venue and account, then set `STATE_BINDING_CONFIRM=paper:<original Binance UID>` (or `live:<original Binance UID>`) for the first verified trading startup. Remove the setting afterward. This attestation never overrides a known mismatch and does not reconcile unknown orders or balances for you. For a legacy observe-only database with no account, `paper:`/`live:` binds only the venue; existing exposure still needs account verification before execution.
+
+Live API keys must allow reading and spot trading, restrict access by IP, and disallow withdrawals, internal/universal transfers, margin, futures, and options. The bot verifies actual key permissions via `/sapi/v1/account/apiRestrictions`, not account-level withdrawal capability. Keys and their exchange permissions are never changed by the bot.
+
 ## Pairs
 
-`TRADING_PAIRS` takes up to 8 USDT spot pairs. Each is independent: cash, position, stop, and daily-loss baseline of its own (`PER_PAIR_BUDGET` each). Inference runs one request at a time, so a pair's decision interval is **5s × pair count**; exits and reconciliation still run every second per pair.
+`TRADING_PAIRS` takes up to 8 alphanumeric USDT spot pairs. Each is independent: cash, position, stop, and daily-loss baseline of its own (`PER_PAIR_BUDGET` each). Inference runs one request at a time, so a pair's nominal decision interval is **5s × pair count**; execution latency can stretch it. Exits and reconciliation are dispatched every second per pair, independently of other pairs and inference. Busy pairs do not accumulate overlapping execution workers.
 
 ## Strategy and limits
 
-Trend-following pullbacks on completed 1-minute candles: EMA20/50 trend, EMA20 pullback recovery, ATR/RSI/volume context. Long-only, no leverage, shorts, pyramiding, or averaging down. Per pair, sizing is the minimum of max position value, risk ÷ 1.5×ATR, and available cash. Local ATR stop (1.5×) and target (3×) exit independently of the model. Order intents persist before submission; uncertain outcomes block and reconcile by client ID.
+Trend-following pullbacks on completed 1-minute candles: EMA20/50 trend, EMA20 pullback recovery, ATR/RSI/volume context. Long-only, no leverage, shorts, pyramiding, or averaging down. Per pair, sizing is the minimum of max position value, risk ÷ entry-to-stop distance (including spread), and available allocated cash. After a buy is filled and its complete fill history is reconciled, a native Binance `STOP_LOSS` sell protects the sellable quantity at the ATR stop (1.5×). Targets (3×), trend reversals, and daily-loss exits remain local.
 
-**Limits:** exits are not exchange-native, so outages are unprotected. Dust may block closing. Model probabilities are not probabilities of profit.
+Native stops survive bot/feed outages. Their intents persist before submission; manual/model/local exits cancel and reconcile the stop before placing a market sell, including cancellation/fill races. If native placement is definitely rejected, the bot attempts an emergency close. Uncertain outcomes retain their intents and never blindly resubmit. Markets without native `STOP_LOSS` support cannot be used for execution.
+
+Fee accounting verifies cumulative fill quantity and quote totals before finalizing an order and paginates large fill histories. BNB/other third-asset fees are tracked in asset units and valued conservatively at the available USDT ask when reconciled; `external_fee_quote_estimate` is an estimate, not historical fill-time valuation. Unvalued fees block new entries and mark equity unavailable, but do not prevent tracking/protecting the filled principal.
+
+**Limits:** there is still a gap between entry execution and native-stop acceptance, especially after uncertain submissions or delayed fill history. Exchange outages/rejections and market gaps can prevent or worsen exits. Native stops do not guarantee a fill price, and rounded dust remains unprotected and may block closing/removal. Targets and daily limits cannot execute locally while the bot is down. Model probabilities are not probabilities of profit. Exercise the full lifecycle on testnet before considering live funds.
 
 ## API
 
@@ -44,6 +58,8 @@ curl -H "Authorization: Bearer $CONTROL_TOKEN" -H 'Content-Type: application/jso
 
 Keep it off the public internet; use `HTTP_ADDR` and TLS plus firewall rules for LAN access.
 
+Starting multiple pairs is all-or-nothing after revalidation. Closing multiple pairs pauses them together, then reports per-pair results; exchange orders themselves cannot be a transactional batch. HTTP 409 can indicate a busy, unresolved, or residual/dust position. Pause does not cancel native protection. Only one API backtest runs at a time.
+
 ## Monitoring, containers, backtesting
 
 ```sh
@@ -54,11 +70,17 @@ cp .env.example .env && chmod 600 .env && podman compose up --build -d
 
 Compose runs bot, PostgreSQL, and exporter. Import `grafana-dashboard.json`; metrics carry a `pair` label. Backtests are rule-only over historical candles with slippage and fees, and do not replay live timing or spreads.
 
+Generate the control/metrics secrets and PostgreSQL password in `.env` before starting Compose. Audit retention defaults to 30 days and 100,000 events (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_EVENTS`). Pruning runs in batches of at most 1,000 rows each minute, so catch-up is gradual; current positions and order/native-stop intents are never pruned. Export audit records separately if longer retention is required. Database files may retain their high-water size until offline maintenance.
+
+Disconnected/stale held positions produce `NaN` equity/exposure instead of disappearing from portfolio totals. Missing quotes have infinite age; removed pairs lose their metrics series. Third-asset fee units are exposed separately. Gate alerts on feed freshness and exporter availability rather than treating missing valuations as zero.
+
 ## Tests
 
 ```sh
 go test -race ./...
 TEST_DATABASE_URL='postgres://test:password@localhost:5432/disposable_test?sslmode=disable' go test -race ./...
+go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 ```
 
-Not implemented: futures, exchange-native stops, Ollaya-based backtests, automatic data migration, audit retention, alerting.
+Not implemented: futures, atomic exchange-native entry/exit brackets or OCO targets, Ollaya-based backtests, automatic database-backend migration, alerting.

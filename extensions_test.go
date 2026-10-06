@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +72,14 @@ func TestPostgresRepositoryContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	repositoryContract(t, r)
+	// PostgreSQL retention must not disturb singleton ownership or durable state.
+	if err := r.Prune(ctx, time.Now().Add(-time.Hour), 1); err != nil {
+		t.Fatal(err)
+	}
+	if events, err := r.Events(ctx); err != nil || len(events) != 1 {
+		t.Fatal("PostgreSQL retention failed", err)
+	}
+	postgresConcurrentRollback(t, ctx, r)
 	if second, err := OpenPostgres(ctx, dsn); err == nil {
 		second.Close()
 		t.Fatal("second bot acquired singleton lock")
@@ -87,6 +96,58 @@ func TestPostgresRepositoryContract(t *testing.T) {
 	if err != nil || state.Pairs["BTCUSDT"].Pending == nil || state.Pairs["BTCUSDT"].Pending.ID != "recovery" {
 		t.Fatal("restart did not preserve intent", err)
 	}
+}
+
+func postgresConcurrentRollback(t *testing.T, ctx context.Context, r *Postgres) {
+	t.Helper()
+	// Force a SQL failure after bot_state has been updated but before commit.
+	// Reads/pruning on the leased connection must not join that transaction.
+	if _, err := r.lease.ExecContext(ctx, `ALTER TABLE events ADD CONSTRAINT test_reject_audit CHECK (kind <> 'rollback_test')`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := r.lease.ExecContext(context.Background(), `ALTER TABLE events DROP CONSTRAINT test_reject_audit`); err != nil {
+			t.Error(err)
+		}
+	}()
+	s, err := r.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aborted := s.copy()
+	aborted.Pairs["BTCUSDT"].Cash = dec("1")
+	var wg sync.WaitGroup
+	for _, worker := range []string{"commit", "read", "prune"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 30; i++ {
+				switch worker {
+				case "commit":
+					if r.Commit(ctx, aborted, "rollback_test", nil) == nil {
+						t.Error("expected SQL rollback")
+					}
+				case "read":
+					loaded, err := r.Load(ctx)
+					if err != nil {
+						t.Error("read joined an aborted transaction", err)
+						return
+					}
+					if !loaded.Pairs["BTCUSDT"].Cash.Equal(s.Pairs["BTCUSDT"].Cash) {
+						t.Error("uncommitted state was visible")
+					}
+					if _, err := r.Events(ctx); err != nil {
+						t.Error("events joined an aborted transaction", err)
+					}
+				case "prune":
+					if err := r.Prune(ctx, time.Now().Add(-time.Hour), 1000); err != nil {
+						t.Error("pruning joined an aborted transaction", err)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 func TestMarketMessageValidationAndGap(t *testing.T) {
 	m := &Market{pair: "BTCUSDT", connected: true}
