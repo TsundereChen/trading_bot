@@ -191,9 +191,6 @@ func TestPairsAreIndependent(t *testing.T) {
 	if a.state.Pairs["ETHUSDT"].Cash.String() != "1000" || a.state.Pairs["BTCUSDT"].Cash.String() != "1000" {
 		t.Fatal("cash not isolated")
 	}
-	if decisionCycleSeconds(1) != 30 || decisionCycleSeconds(3) != 90 {
-		t.Fatal("per-pair cycle should scale with pair count")
-	}
 }
 
 func TestObserveOnlyAndTruncatedResponse(t *testing.T) {

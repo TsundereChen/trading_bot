@@ -44,7 +44,7 @@ Live API keys must allow reading and spot trading, restrict access by IP, and di
 
 ## Pairs
 
-`TRADING_PAIRS` takes up to 8 alphanumeric USDT/USDC spot pairs. Each is independent: cash, position, stop, and daily-loss baseline of its own (`PER_PAIR_BUDGET` each, in that pair's quote currency). Ollaya requests are globally serialized, rotating pairs every `DECISION_INTERVAL_SECONDS` (default 30). Four pairs therefore receive one evaluation each approximately every 120 seconds, without a four-request burst. `OLLAYA_TIMEOUT_SECONDS` defaults to 20 and must be less than the request interval. The candle timeframe does not throttle requests. Stale quotes, invalid candles, and unresolved orders can skip an evaluation; exchange settlement can delay subsequent requests. Exits and reconciliation are dispatched every five seconds per pair independently of inference. A monitor heartbeat is logged every 30 seconds.
+`TRADING_PAIRS` takes up to 8 alphanumeric USDT/USDC spot pairs. Each is independent: cash, position, stop, and daily-loss baseline of its own (`PER_PAIR_BUDGET` each, in that pair's quote currency). Every `DECISION_INTERVAL_SECONDS` (default 30), a round evaluates **all pairs sequentially in configured order**, with no interval between pairs. Retained pairs outside the configuration are evaluated afterward in alphabetical order. Requests and rounds never overlap. If a round takes longer than the interval, the next starts after it finishes, without queued catch-up rounds; actual per-pair cadence then exceeds 30 seconds. `OLLAYA_TIMEOUT_SECONDS` defaults to 20 per request and must be less than the round interval. The candle timeframe does not throttle requests. Stale quotes, invalid candles, and unresolved orders can skip an evaluation; exchange settlement can delay subsequent pairs. Status reports `model_cadence=sequential_all_pairs` and `model_round_interval_seconds`; `decision_cycle_seconds` is the configured round interval, not multiplied by the pair count. Exits and reconciliation are dispatched every five seconds per pair independently of inference. A monitor heartbeat is logged every 30 seconds.
 
 ## Strategy and limits
 
@@ -126,6 +126,16 @@ source at `/internal/metrics`, and the exporter exposes a cached Prometheus
 scrape endpoint on port 9091. Generate **different** `CONTROL_TOKEN` and
 `METRICS_TOKEN` secrets; both are required, and the exporter receives only the
 metrics credential.
+
+The exporter `/metrics` endpoint contains the **same trading and process metrics**
+as the bot's authenticated `/internal/metrics`, plus exporter availability,
+snapshot age, and fetch-error counters. It is cached, not redacted: it includes
+pair equity/exposure, P&L, fees, trade statistics, positions/stops/targets, model
+outcomes, and feed health. It does not expose API keys or authentication tokens.
+On a failed fetch or expired snapshot, it serves only exporter health metrics.
+`METRICS_TOKEN` authenticates the exporter to the bot; the exporter listener
+itself is unauthenticated. Keep it loopback/private or protect external access
+with an authenticated proxy. Bot `/api/*` remains control-token-only.
 
 ```sh
 BOT_URL=http://127.0.0.1:8080 ./trader exporter   # Prometheus scrapes 9091, not the API

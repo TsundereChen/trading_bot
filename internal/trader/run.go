@@ -104,7 +104,7 @@ func Run() error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.ListenAndServe() }()
 	slog.Info("trader started", "listen", cfg.Listen, "venue", cfg.Venue.Name, "trading_enabled", cfg.Trading, "entries", "paused until start command", "model", cfg.OllayaModel, "pairs", state.symbols())
-	slog.Info("strategy configured", "signal_interval", cfg.SignalInterval, "entry_policy", cfg.EntryPolicy, "decision_interval_seconds", cfg.decisionSeconds(), "model_timeout_seconds", cfg.modelTimeout().Seconds(), "reentry_cooldown_seconds", cfg.cooldown().Seconds(), "monitor_interval_seconds", 5, "per_pair_budget", cfg.PerPairBudget.String(), "max_position", cfg.MaxPosition.String(), "risk_per_trade", cfg.RiskPerTrade.String(), "daily_loss_limit", cfg.DailyLoss.String())
+	slog.Info("strategy configured", "signal_interval", cfg.SignalInterval, "entry_policy", cfg.EntryPolicy, "model_cadence", "sequential_all_pairs", "model_round_interval_seconds", cfg.decisionSeconds(), "model_timeout_seconds", cfg.modelTimeout().Seconds(), "reentry_cooldown_seconds", cfg.cooldown().Seconds(), "monitor_interval_seconds", 5, "per_pair_budget", cfg.PerPairBudget.String(), "max_position", cfg.MaxPosition.String(), "risk_per_trade", cfg.RiskPerTrade.String(), "daily_loss_limit", cfg.DailyLoss.String())
 	if cfg.Venue.Live {
 		slog.Warn("LIVE VENUE: real funds are at risk", "base_url", cfg.Venue.BaseURL)
 	}

@@ -9,8 +9,47 @@ import (
 
 const decisionIntervalSeconds = 30
 
-func decisionCycleSeconds(pairs int) int {
-	return decisionIntervalSeconds * max(1, pairs)
+// decisionPairs preserves configuration order and includes retained exposure
+// not in the current configuration after the configured pairs.
+func (a *App) decisionPairs() []string {
+	s := a.snapshot()
+	pairs := make([]string, 0, len(s.Pairs))
+	for _, pair := range a.cfg.Pairs {
+		if s.Pairs[pair] != nil && !containsString(pairs, pair) {
+			pairs = append(pairs, pair)
+		}
+	}
+	for _, pair := range s.symbols() {
+		if !containsString(pairs, pair) {
+			pairs = append(pairs, pair)
+		}
+	}
+	return pairs
+}
+
+// Each round evaluates every pair serially. Slow rounds never overlap or queue
+// catch-up rounds: after an overrun the next round starts once this one finishes.
+func runDecisionRounds(ctx context.Context, interval time.Duration, pairs func() []string, decide func(context.Context, string)) {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			nextRound := time.Now().Add(interval)
+			for _, pair := range pairs() {
+				if ctx.Err() != nil {
+					return
+				}
+				decide(ctx, pair)
+			}
+			timer.Reset(max(time.Until(nextRound), 0))
+		}
+	}
 }
 
 func (a *App) Run(ctx context.Context) {
@@ -60,28 +99,5 @@ func (a *App) Run(ctx context.Context) {
 	}()
 	defer services.Wait()
 	interval := time.Duration(a.cfg.decisionSeconds()) * time.Second
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-	index := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			pairs := a.snapshot().symbols()
-			if len(pairs) == 0 {
-				timer.Reset(interval)
-				continue
-			}
-			pair := pairs[index%len(pairs)]
-			index++
-			nextRequest := time.Now().Add(interval)
-			a.decide(ctx, pair)
-			delay := time.Until(nextRequest)
-			if delay < 0 {
-				delay = 0
-			}
-			timer.Reset(delay)
-		}
-	}
+	runDecisionRounds(ctx, interval, a.decisionPairs, a.decide)
 }

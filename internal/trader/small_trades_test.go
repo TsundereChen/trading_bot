@@ -98,15 +98,16 @@ func TestUSDCFeeValuationAndMixedPortfolio(t *testing.T) {
 	}
 }
 
-func TestGlobalModelSchedulerRotatesWithoutBurst(t *testing.T) {
+func TestModelSchedulerEvaluatesAllPairsEachRound(t *testing.T) {
 	a := testApp(t)
 	a.cfg.DecisionSeconds = 1
+	a.cfg.Pairs = []string{"BTCUSDT", "ETHUSDC"}
 	a.feeds = NewFeeds(nil) // No network feed supervisors in this test.
 	for _, pair := range []string{"BTCUSDT", "ETHUSDC"} {
 		a.state.Pairs[pair] = &Position{Pair: pair, Paused: true}
 		a.feeds.markets[pair] = &Market{pair: pair, connected: true, bid: dec("100"), ask: dec("100.01"), quoteAt: time.Now(), candles: risingCandles(65)}
 	}
-	calls := make(chan time.Time, 2)
+	calls := make(chan time.Time, 4)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls <- time.Now()
 		fmt.Fprint(w, `{"model":"winnow:e4b","done_reason":"decide","answers":{"action":{"type":"choice","choice":"HOLD","probabilities":{"HOLD":1,"ENTER_LONG":0,"EXIT_LONG":0}}}}`)
@@ -118,7 +119,7 @@ func TestGlobalModelSchedulerRotatesWithoutBurst(t *testing.T) {
 	done := make(chan struct{})
 	go func() { a.Run(ctx); close(done) }()
 	var times []time.Time
-	for len(times) < 2 {
+	for len(times) < 4 {
 		select {
 		case at := <-calls:
 			times = append(times, at)
@@ -128,8 +129,11 @@ func TestGlobalModelSchedulerRotatesWithoutBurst(t *testing.T) {
 	}
 	cancel()
 	<-done
-	if times[1].Sub(times[0]) < 900*time.Millisecond {
-		t.Fatal("model queries burst instead of global spacing")
+	if times[1].Sub(times[0]) >= 900*time.Millisecond || times[3].Sub(times[2]) >= 900*time.Millisecond {
+		t.Fatal("scheduler delayed between pairs within a round")
+	}
+	if times[2].Sub(times[0]) < 900*time.Millisecond {
+		t.Fatal("scheduler did not wait for the next round interval")
 	}
 }
 
