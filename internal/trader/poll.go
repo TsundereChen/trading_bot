@@ -107,13 +107,14 @@ func (a *App) pollPair(ctx context.Context, pair string) {
 			return
 		}
 		dailyHit := p.Day == day && p.DayEquity.Sub(p.equity(m.Bid)).GreaterThanOrEqual(a.cfg.DailyLoss)
-		if dailyHit && !p.Paused {
+		if dailyHit && (!p.Paused || p.Starting) {
 			if err := a.update(workCtx, "daily_loss_limit", map[string]string{"pair": pair}, func(s State) error {
 				pos := s.Pairs[pair]
 				if pos == nil {
 					return errNoChange
 				}
 				pos.Paused = true
+				pos.Starting = false
 				return nil
 			}); err != nil {
 				return
@@ -138,5 +139,9 @@ func (a *App) pollPair(ctx context.Context, pair string) {
 	}
 	if err := a.valueExternalFees(workCtx, pair); err != nil {
 		a.fail(context.WithoutCancel(ctx), pair, "fee_valuation", err)
+		return
+	}
+	if err := a.autoEnableEntries(workCtx, pair); err != nil {
+		a.fail(context.WithoutCancel(ctx), pair, "startup_reconciliation", err)
 	}
 }

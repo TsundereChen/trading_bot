@@ -89,7 +89,7 @@ func Run() error {
 		if retainDust(state.Pairs[pair], symbol) {
 			slog.Info("sub-step residual retained in dust ledger", "pair", pair, "quantity", state.Pairs[pair].DustQty.String())
 		}
-		state.Pairs[pair].Paused = true
+		prepareEntryStartup(state.Pairs[pair], cfg.Trading)
 	}
 	if err := repo.Commit(ctx, state, "startup", map[string]any{"trading_enabled": cfg.Trading, "venue": cfg.Venue.Name, "account_id": state.AccountID, "model": cfg.OllayaModel}); err != nil {
 		return err
@@ -103,7 +103,7 @@ func Run() error {
 	go func() { defer close(done); a.Run(ctx) }()
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.ListenAndServe() }()
-	slog.Info("trader started", "listen", cfg.Listen, "venue", cfg.Venue.Name, "trading_enabled", cfg.Trading, "entries", "paused until start command", "model", cfg.OllayaModel, "pairs", state.symbols())
+	slog.Info("trader started", "listen", cfg.Listen, "venue", cfg.Venue.Name, "trading_enabled", cfg.Trading, "entries", "automatically enabled after startup safety checks", "model", cfg.OllayaModel, "pairs", state.symbols())
 	slog.Info("signal windows configured", "signal_interval", cfg.SignalInterval, "context_interval", cfg.ContextInterval, "completed_candles_only", true)
 	slog.Info("strategy configured", "signal_interval", cfg.SignalInterval, "entry_policy", cfg.EntryPolicy, "model_cadence", "sequential_all_pairs", "model_round_interval_seconds", cfg.decisionSeconds(), "model_timeout_seconds", cfg.modelTimeout().Seconds(), "reentry_cooldown_seconds", cfg.cooldown().Seconds(), "monitor_interval_seconds", 5, "per_pair_budget", cfg.PerPairBudget.String(), "max_position", cfg.MaxPosition.String(), "risk_per_trade", cfg.RiskPerTrade.String(), "daily_loss_limit", cfg.DailyLoss.String())
 	if cfg.Venue.Live {

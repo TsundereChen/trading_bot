@@ -65,6 +65,7 @@ func (a *App) persist(ctx context.Context, next State, kind string, data any, pu
 		a.fatal = true
 		for _, p := range a.state.Pairs {
 			p.Paused = true
+			p.Starting = false
 			p.Error = "Persistence failure: " + err.Error()
 		}
 		a.mu.Unlock()
@@ -136,10 +137,11 @@ func (a *App) fail(ctx context.Context, pair, component string, err error) {
 				continue
 			}
 			message := component + ": " + err.Error()
-			if !p.Paused || p.Error != message {
+			if !p.Paused || p.Starting || p.Error != message {
 				changed = true
 			}
 			p.Paused, p.Error = true, message
+			p.Starting = false
 		}
 		if !changed {
 			return errNoChange

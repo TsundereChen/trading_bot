@@ -139,7 +139,7 @@ func TestControlAuthAndPairGuards(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w.Code
 	}
-	if code := call(`{"action":"start"}`, false); code != 401 {
+	if code := call(`{"action":"close"}`, false); code != 401 {
 		t.Fatal("unauthenticated control accepted:", code)
 	}
 	// Removing a pair that still holds a position is refused.
@@ -148,7 +148,7 @@ func TestControlAuthAndPairGuards(t *testing.T) {
 	if code := call(`{"action":"pairs","pairs":["ETHUSDT"]}`, true); code != 409 {
 		t.Fatal("open position pair removed:", code)
 	}
-	if code := call(`{"action":"pause","pair":"NOPE"}`, true); code != 404 {
+	if code := call(`{"action":"close","pair":"NOPE"}`, true); code != 404 {
 		t.Fatal("unknown pair accepted:", code)
 	}
 	if code := call(`{"action":"frobnicate"}`, true); code != 400 {
@@ -156,7 +156,7 @@ func TestControlAuthAndPairGuards(t *testing.T) {
 	}
 }
 
-// Each pair must be independently pausable and startable.
+// Safety faults and allocations must stay isolated per pair.
 func TestPairsAreIndependent(t *testing.T) {
 	a := testApp(t)
 	a.state.Pairs["ETHUSDT"] = &Position{Pair: "ETHUSDT", Paused: true, Cash: dec("1000")}
@@ -165,27 +165,11 @@ func TestPairsAreIndependent(t *testing.T) {
 	market.bid, market.ask, market.quoteAt, market.connected = dec("50"), dec("51"), time.Now(), true
 	a.symbols["ETHUSDT"] = Symbol{Symbol: "ETHUSDT", Base: "ETH", Quote: "USDT", Step: dec("0.01"), MinQty: dec("0.01"), MinNotional: dec("5")}
 
-	h := a.routes(prometheus.NewRegistry())
-	post := func(body string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("POST", "/api/control", strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer "+a.cfg.ControlToken)
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		return w
-	}
-	if w := post(`{"action":"start","pair":"ETHUSDT"}`); w.Code != 200 {
-		t.Fatal("start failed:", w.Code, w.Body.String())
-	}
-	if a.state.Pairs["ETHUSDT"].Paused || !a.state.Pairs["BTCUSDT"].Paused {
-		t.Fatal("pause state leaked across pairs")
-	}
-	if w := post(`{"action":"pause"}`); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	for _, pair := range a.state.symbols() {
-		if !a.state.Pairs[pair].Paused {
-			t.Fatal("pause-all missed", pair)
-		}
+	a.state.Pairs["BTCUSDT"].Paused = false
+	a.state.Pairs["ETHUSDT"].Paused = false
+	a.fail(context.Background(), "BTCUSDT", "test", fmt.Errorf("safety fault"))
+	if !a.snapshot().Pairs["BTCUSDT"].Paused || a.snapshot().Pairs["ETHUSDT"].Paused {
+		t.Fatal("safety fault leaked across pairs")
 	}
 	// Positions and cash stay isolated per pair.
 	if a.state.Pairs["ETHUSDT"].Cash.String() != "1000" || a.state.Pairs["BTCUSDT"].Cash.String() != "1000" {

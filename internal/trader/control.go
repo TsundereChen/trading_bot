@@ -7,8 +7,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/shopspring/decimal"
 )
 
 type controlCommand struct {
@@ -84,7 +82,7 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, name := range requested {
 				if s.Pairs[name] == nil {
-					s.Pairs[name] = &Position{Pair: name, Paused: true, Cash: a.cfg.PerPairBudget}
+					s.Pairs[name] = &Position{Pair: name, Paused: a.cfg.Trading, Starting: a.cfg.Trading, Cash: a.cfg.PerPairBudget}
 					ensurePerformance(s.Pairs[name])
 				}
 			}
@@ -105,7 +103,7 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"pairs": a.snapshot().symbols()})
 		return
 	}
-	if cmd.Action != "pause" && cmd.Action != "start" && cmd.Action != "close" {
+	if cmd.Action != "close" {
 		http.Error(w, "unknown action", 400)
 		return
 	}
@@ -114,19 +112,7 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 404)
 		return
 	}
-	balances := map[string]decimal.Decimal{}
-	if cmd.Action == "start" && a.cfg.Trading {
-		if !a.executionAllowed() {
-			http.Error(w, "execution identity unverified", 409)
-			return
-		}
-		balances, err = a.binance.Holdings(ctx)
-		if err != nil {
-			http.Error(w, "account reconciliation failed", 409)
-			return
-		}
-	}
-	if cmd.Action == "close" && !a.cfg.Trading {
+	if !a.executionAllowed() {
 		http.Error(w, "execution disabled", 409)
 		return
 	}
@@ -137,49 +123,15 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 			if p == nil {
 				return fmt.Errorf("pair was removed")
 			}
-			if cmd.Action != "start" {
-				continue
-			}
-			if p.Version != snapshot.Pairs[name].Version {
-				return fmt.Errorf("state changed during start validation; retry")
-			}
-			m := a.feeds.Snapshot(name)
-			if p.Pending != nil || !freshMarket(m, name) || len(p.UnvaluedFees) > 0 {
-				return fmt.Errorf("unresolved order, fee valuation, or stale quote on %s", name)
-			}
-			day := time.Now().UTC().Format("2006-01-02")
-			if p.Day == day && p.DayEquity.Sub(p.equity(m.Bid)).GreaterThanOrEqual(a.cfg.DailyLoss) {
-				return fmt.Errorf("daily loss limit reached on %s", name)
-			}
-			if a.cfg.Trading {
-				symbol, ok := a.symbolFor(name)
-				if !ok || !symbol.StopAllowed || balances[symbol.Base].LessThan(p.Qty.Add(p.DustQty)) {
-					return fmt.Errorf("account or exchange rule reconciliation failed on %s", name)
-				}
-				if p.Qty.IsPositive() && (p.Protection == nil || p.Protection.OrderID == 0) {
-					return fmt.Errorf("native protection not yet verified on %s", name)
-				}
-			}
 		}
 		for _, name := range targets {
 			p := s.Pairs[name]
-			p.Paused = cmd.Action != "start"
-			if cmd.Action == "start" {
-				p.Error = ""
-				day := time.Now().UTC().Format("2006-01-02")
-				if p.Day != day {
-					p.Day, p.DayEquity = day, p.equity(a.feeds.Snapshot(name).Bid)
-				}
-			}
+			p.Paused, p.Starting = true, false
 		}
 		return nil
 	})
 	if err != nil {
 		http.Error(w, err.Error(), 409)
-		return
-	}
-	if cmd.Action != "close" {
-		writeJSON(w, a.snapshot())
 		return
 	}
 	// Exchange closes cannot be transactional as a batch. Pause atomically, then
@@ -197,11 +149,23 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 				result = "execution busy; pair remains paused"
 			} else {
 				err := a.closeUnderGate(ctx, name, "manual_close")
-				gate.Unlock()
 				if err != nil {
 					a.fail(context.WithoutCancel(ctx), name, "execution", err)
 					result = err.Error()
+				} else if err := a.update(context.WithoutCancel(ctx), "manual_close_complete", map[string]string{"pair": name}, func(s State) error {
+					p := s.Pairs[name]
+					if p == nil {
+						return errNoChange
+					}
+					if p.Error != "" {
+						return errNoChange
+					}
+					p.Starting = a.cfg.Trading
+					return nil
+				}); err != nil {
+					result = err.Error()
 				}
+				gate.Unlock()
 			}
 			resultMu.Lock()
 			results[name] = result

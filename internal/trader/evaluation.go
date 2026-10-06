@@ -78,6 +78,9 @@ func entryBlockReason(p *Position, c Config, m MarketSnapshot, f strategy.Featur
 	case c.DailyLoss.IsPositive() && p.Day == time.Now().UTC().Format("2006-01-02") && freshMarket(m, p.Pair) && len(p.UnvaluedFees) == 0 && p.DayEquity.Sub(p.equity(m.Bid)).GreaterThanOrEqual(c.DailyLoss):
 		return "daily_loss_limit"
 	case p.Paused:
+		if p.Starting {
+			return "startup_checks"
+		}
 		return "paused"
 	case p.Pending != nil:
 		return "unresolved_order"

@@ -11,7 +11,7 @@ export OLLAYA_URL="http://$OLLAYA_HOST:11435" TRADING_PAIRS=BTCUSDT,ETHUSDT
 ./trader
 ```
 
-Requires Go 1.26.8 or newer. Startup is paused and no frontend exists; control it over HTTP. See `.env.example` for all settings. Replace example secret placeholders before running; they are rejected.
+Requires Go 1.26.8 or newer. With `ENABLE_TRADING=true`, entries start automatically after startup reconciliation and safety checks; stop the process/container to stop the bot. There is no start/pause/stop API switch and no frontend. See `.env.example` for all settings. Replace example secret placeholders before running; they are rejected.
 
 Set `OLLAYA_MODEL` to select the Ollaya decision model (default `winnow:e4b`).
 The model must support Ollaya's `/api/decide` structured choice/probability
@@ -36,7 +36,7 @@ Older databases have no identity metadata and are **not automatically adopted**.
 
 ### Paper trading with Demo Mode
 
-Create a **Demo Mode** API key and secret at [Binance Demo API Management](https://demo.binance.com/en/my/settings/api-management), not in live-account or Spot Testnet API management. Set `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and `ENABLE_TRADING=true`; leave `BINANCE_BASE_URL` unset (or use `https://demo-api.binance.com/api`). Startup remains paused: use `/api/control` to start after feeds and account reconciliation are ready. With `ENABLE_TRADING=false`, the bot only observes and does not submit virtual orders.
+Create a **Demo Mode** API key and secret at [Binance Demo API Management](https://demo.binance.com/en/my/settings/api-management), not in live-account or Spot Testnet API management. Set `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and `ENABLE_TRADING=true`; leave `BINANCE_BASE_URL` unset (or use `https://demo-api.binance.com/api`). Each pair automatically becomes eligible after fresh signal/context feeds, pending-order and fee reconciliation, verified native protection for existing positions, account holdings verification, and the daily-loss check. With `ENABLE_TRADING=false`, the bot only observes and does not submit virtual orders.
 
 Per [Binance's Demo Mode documentation](https://developers.binance.com/en/docs/products/spot/demo-mode/general-info), the Spot `/api/v3` order/account endpoints and signing rules remain the same; only the service hosts change. REST uses `demo-api.binance.com`, and combined market streams use `demo-stream.binance.com/stream`. The `demo-ws-api` service is a separate request/response API and is not the market-stream endpoint. Demo Mode uses virtual balances and realistic—but not identical to live—market data. Balance resets and maintenance require reconciliation; do not reset balances while the bot has tracked exposure.
 
@@ -111,13 +111,15 @@ All `/api/*` need `Authorization: Bearer $CONTROL_TOKEN`. Omitting `pair` applie
 ```sh
 curl -H "Authorization: Bearer $CONTROL_TOKEN" localhost:8080/api/status
 curl -H "Authorization: Bearer $CONTROL_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"action":"start","pair":"BTCUSDT"}' localhost:8080/api/control
-# pause | close | {"action":"pairs","pairs":[...]}
+  -d '{"action":"close","pair":"BTCUSDT"}' localhost:8080/api/control
+# close | {"action":"pairs","pairs":[...]}; no start/pause/stop actions
 ```
 
 Keep it off the public internet; use `HTTP_ADDR` and TLS plus firewall rules for LAN access.
 
-Starting multiple pairs is all-or-nothing after revalidation. Closing multiple pairs pauses them together, then reports per-pair results; exchange orders themselves cannot be a transactional batch. HTTP 409 can indicate a busy, unresolved, or residual/dust position. Pause does not cancel native protection. Only one API backtest runs at a time.
+Starting/stopping trading is a process lifecycle operation, not an API command. `paused=true` now indicates startup checks or a safety halt; `starting=true` means automatic startup/revalidation is pending. Faults halt new entries for the affected pair until repair and process restart. The same-day loss baseline survives restart and cannot be bypassed by restarting. Existing positions still receive protective checks and native stops remain in place. Stopping the process does not close exchange positions or cancel exchange-side orders.
+
+Closing multiple pairs temporarily blocks new entries together, then reports per-pair results; exchange orders themselves cannot be a transactional batch. After a successful close on a healthy pair, eligibility resumes automatically after revalidation and the normal cooldown. Failed/busy closes remain safety-blocked; resolve the failure and restart the process. HTTP 409 can indicate a busy, unresolved, or residual/dust position. Added pairs also initialize automatically. Only one API backtest runs at a time.
 
 ## Monitoring, containers, backtesting
 
@@ -236,7 +238,7 @@ order/control events, faults, and shutdown. A `HOLD` decision with
 a model decision is not an order confirmation. Authenticated `/api/status`
 and `/api/events` provide position, pending-order, native-stop, and audit details.
 Healthchecks only prove HTTP liveness, not successful trading. Every restart
-pauses entries until an explicit start command. Credentials and full signed
+automatically enables entries only after safety checks; no start command is needed. Credentials and full signed
 exchange request URLs are not included in the new runtime logs.
 
 Generate the control/metrics secrets and PostgreSQL password in `.env` before starting Compose. Audit retention defaults to 30 days and 100,000 events (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_EVENTS`). Pruning runs in batches of at most 1,000 rows each minute, so catch-up is gradual; current positions and order/native-stop intents are never pruned. Export audit records separately if longer retention is required. Database files may retain their high-water size until offline maintenance.

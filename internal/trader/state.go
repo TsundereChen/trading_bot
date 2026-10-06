@@ -28,6 +28,7 @@ type Position struct {
 	Pair               string                     `json:"pair"`
 	Version            uint64                     `json:"version"`
 	Paused             bool                       `json:"paused"`
+	Starting           bool                       `json:"starting"`
 	Cash               decimal.Decimal            `json:"cash"`
 	Qty                decimal.Decimal            `json:"quantity"`
 	Cost               decimal.Decimal            `json:"cost"`

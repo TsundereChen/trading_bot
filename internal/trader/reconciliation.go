@@ -204,6 +204,7 @@ func (a *App) clearRejected(ctx context.Context, pair, id string, protection boo
 			p.Pending = nil
 		}
 		p.Paused, p.Error = true, err.Error()
+		p.Starting = false
 		return nil
 	})
 }

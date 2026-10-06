@@ -150,16 +150,18 @@ func TestSQLiteSingletonAliasesAndRestart(t *testing.T) {
 	}
 }
 
-func TestStartAllFailureIsAtomicAndAuditedOnlyOnSuccess(t *testing.T) {
+func TestRemovedRunSwitchesDoNotChangeState(t *testing.T) {
 	a := testApp(t)
 	a.state.Pairs["ETHUSDT"] = &Position{Pair: "ETHUSDT", Paused: true, Cash: dec("1000")}
 	a.feeds.SetPairs([]string{"BTCUSDT", "ETHUSDT"})
 	if err := a.commit(context.Background(), a.state, "initial", nil); err != nil {
 		t.Fatal(err)
 	}
-	w := postControl(a, `{"action":"start"}`)
-	if w.Code != 409 {
-		t.Fatal(w.Code, w.Body.String())
+	for _, action := range []string{"start", "pause", "stop"} {
+		w := postControl(a, fmt.Sprintf(`{"action":%q}`, action))
+		if w.Code != 400 {
+			t.Fatal(action, w.Code, w.Body.String())
+		}
 	}
 	for _, p := range a.snapshot().Pairs {
 		if !p.Paused {
@@ -176,7 +178,7 @@ func TestStartAllFailureIsAtomicAndAuditedOnlyOnSuccess(t *testing.T) {
 	}
 }
 
-func TestSlowExchangeDoesNotBlockStatusPauseOrOtherPair(t *testing.T) {
+func TestSlowExchangeDoesNotBlockStatusFaultOrOtherPair(t *testing.T) {
 	a := executionApp(t)
 	a.state.Pairs["ETHUSDT"] = &Position{Pair: "ETHUSDT", Paused: true, Cash: dec("900"), Qty: dec("1"), Cost: dec("100"), Stop: dec("110"), Target: dec("120")}
 	a.feeds.SetPairs([]string{"BTCUSDT", "ETHUSDT"})
@@ -232,9 +234,7 @@ func TestSlowExchangeDoesNotBlockStatusPauseOrOtherPair(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("status blocked by exchange I/O")
 	}
-	if w := postControl(a, `{"action":"pause","pair":"BTCUSDT"}`); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	a.fail(context.Background(), "BTCUSDT", "test", errors.New("safety fault"))
 	a.poll(context.Background())
 	if ethSells.Load() != 1 || !a.snapshot().Pairs["ETHUSDT"].Qty.IsZero() {
 		t.Fatal("other pair's protective exit was blocked")
@@ -668,7 +668,7 @@ func TestAuditRetentionPreservesStateAndNewestEvents(t *testing.T) {
 
 func TestControlRejectsTrailingJSONAndBacktestHugeDecimals(t *testing.T) {
 	a := testApp(t)
-	if w := postControl(a, `{"action":"start"} {"action":"pause"}`); w.Code != 400 {
+	if w := postControl(a, `{"action":"close"} {"action":"close"}`); w.Code != 400 {
 		t.Fatal("trailing command accepted")
 	}
 	input := strategy.BacktestInput{Candles: syntheticCandles(), Budget: dec("1e1000000")}
@@ -918,7 +918,7 @@ func TestModelEntryPersistsBuyAndNativeStopIntents(t *testing.T) {
 	}
 }
 
-func TestPauseDuringInferenceInvalidatesModelEntry(t *testing.T) {
+func TestSafetyFaultDuringInferenceInvalidatesModelEntry(t *testing.T) {
 	a := eligibleExecutionApp(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-release; enterAnswer(w) }))
@@ -931,9 +931,7 @@ func TestPauseDuringInferenceInvalidatesModelEntry(t *testing.T) {
 	done := make(chan struct{})
 	go func() { a.decide(context.Background(), "BTCUSDT"); close(done) }()
 	<-entered
-	if w := postControl(a, `{"action":"pause"}`); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	a.fail(context.Background(), "BTCUSDT", "test", errors.New("safety fault"))
 	close(release)
 	<-done
 	p := a.snapshot().Pairs["BTCUSDT"]
@@ -973,7 +971,7 @@ func TestShutdownDrainsControlRequestsBeforeRepositoryCanClose(t *testing.T) {
 		t.Fatal("control worker outlived request drain")
 	case <-time.After(20 * time.Millisecond):
 	}
-	if w := postControl(a, `{"action":"pause"}`); w.Code != 503 {
+	if w := postControl(a, `{"action":"close"}`); w.Code != 503 {
 		t.Fatal("new control request accepted during shutdown")
 	}
 	close(release)
