@@ -35,7 +35,6 @@ func config() (Config, error) {
 		ControlToken: os.Getenv("CONTROL_TOKEN"),
 		DatabaseURL:  os.Getenv("DATABASE_URL"),
 		Trading:      strings.EqualFold(os.Getenv("ENABLE_TRADING"), "true"),
-		PaperMode:    strings.EqualFold(os.Getenv("PAPER_MODE"), "true"),
 		MaxPairs:     8,
 	}
 	c.MetricsToken = env("METRICS_TOKEN", c.ControlToken)
@@ -48,7 +47,7 @@ func config() (Config, error) {
 	}
 	c.Pairs = pairs
 
-	venue, err := resolveVenue(c.PaperMode, os.Getenv("BINANCE_BASE_URL"))
+	venue, err := resolveVenue(os.Getenv("BINANCE_BASE_URL"))
 	if err != nil {
 		return c, err
 	}

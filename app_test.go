@@ -324,22 +324,22 @@ func TestParsePairsAndVenue(t *testing.T) {
 			t.Fatalf("accepted %q", bad)
 		}
 	}
-	if v, err := resolveVenue(false, ""); err != nil || v.Live {
+	if v, err := resolveVenue(""); err != nil || v.Live {
 		t.Fatal("unset endpoint must default to paper:", v, err)
 	}
-	if v, err := resolveVenue(false, liveBaseURL); err != nil || !v.Live || v.Name != "live" {
+	if v, err := resolveVenue(liveBaseURL); err != nil || !v.Live || v.Name != "live" {
 		t.Fatal("live endpoint must select live venue:", v, err)
 	}
 	// Trading permission is a separate switch from venue selection.
-	v, err := resolveVenue(false, liveBaseURL)
-	if err != nil || !v.Live {
+	if v, err := resolveVenue(liveBaseURL); err != nil || !v.Live {
 		t.Fatal(err)
 	}
-	if _, err := resolveVenue(false, "https://example.invalid"); err == nil {
+	if _, err := resolveVenue("https://example.invalid"); err == nil {
 		t.Fatal("custom venue accepted")
 	}
-	if _, err := resolveVenue(true, liveBaseURL); err == nil {
-		t.Fatal("paper mode must refuse the live exchange")
+	// A trailing slash still selects live.
+	if v, err := resolveVenue("https://api.binance.com/"); err != nil || !v.Live {
+		t.Fatal("trailing slash must still select live:", v, err)
 	}
 }
 

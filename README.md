@@ -24,7 +24,6 @@ Set `OLLAYA_HOST` to the host running Ollaya. Startup is always paused. **Orders
 |---|---|
 | `BINANCE_BASE_URL` unset | Binance Spot **Testnet** (default) |
 | `BINANCE_BASE_URL=https://api.binance.com` | Binance Spot **live**, real funds |
-| `PAPER_MODE=true` | Forces testnet and refuses a live endpoint |
 | `ENABLE_TRADING=true` | The only switch that permits orders, on either venue |
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | Required when `ENABLE_TRADING=true` |
 

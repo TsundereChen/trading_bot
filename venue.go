@@ -28,14 +28,8 @@ const (
 // explicitly selects live; ENABLE_TRADING remains the only switch that permits
 // orders, on either venue. Live is the operator's risk to accept and is
 // reported loudly at startup rather than gated here.
-func resolveVenue(paperMode bool, baseURL string) (Venue, error) {
+func resolveVenue(baseURL string) (Venue, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if paperMode {
-		if base == liveBaseURL {
-			return Venue{}, fmt.Errorf("PAPER_MODE is true but BINANCE_BASE_URL is the live exchange; unset the override to use testnet")
-		}
-		return paper(), nil
-	}
 	switch base {
 	case "":
 		return paper(), nil

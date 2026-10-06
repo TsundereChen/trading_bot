@@ -82,7 +82,6 @@ type Config struct {
 	Database, Listen, OllayaURL, OllayaKey, ControlToken string
 	DatabaseURL, MetricsToken                            string
 	Trading                                              bool
-	PaperMode                                            bool
 	PerPairBudget, MaxPosition, RiskPerTrade, DailyLoss  decimal.Decimal
 	MaxPairs                                             int
 	Venue                                                Venue

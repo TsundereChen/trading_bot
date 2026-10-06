@@ -30,7 +30,6 @@ services:
       TRADING_PAIRS: ${TRADING_PAIRS:-BTCUSDT}
       # Unset BINANCE_BASE_URL means testnet. Set it to the live host to trade live.
       BINANCE_BASE_URL: ${BINANCE_BASE_URL:-}
-      PAPER_MODE: ${PAPER_MODE:-false}
       ENABLE_TRADING: ${ENABLE_TRADING:-false}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
