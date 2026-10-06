@@ -17,25 +17,33 @@ import (
 func repositoryContract(t *testing.T, r Repository) {
 	t.Helper()
 	ctx := context.Background()
-	s := State{Pair: "BTCUSDT", Cash: dec("1000"), Pending: &Pending{ID: "recovery", Side: "BUY", Qty: dec("0.01")}}
+	s := State{Pairs: map[string]*Position{
+		"BTCUSDT": {Pair: "BTCUSDT", Cash: dec("1000"), Pending: &Pending{ID: "recovery", Side: "BUY", Qty: dec("0.01")}},
+		"ETHUSDT": {Pair: "ETHUSDT", Cash: dec("500")},
+	}}
 	if err := r.Commit(ctx, s, "contract_test", map[string]string{"test": "yes"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := r.Load(ctx)
-	if err != nil || loaded.Pair != s.Pair || loaded.Pending == nil || loaded.Pending.ID != "recovery" {
+	btc := loaded.Pairs["BTCUSDT"]
+	if err != nil || btc == nil || btc.Pending == nil || btc.Pending.ID != "recovery" {
 		t.Fatalf("load %+v: %v", loaded, err)
+	}
+	// Multiple pairs must round-trip independently.
+	if eth := loaded.Pairs["ETHUSDT"]; eth == nil || !eth.Cash.Equal(dec("500")) {
+		t.Fatalf("second pair lost: %+v", loaded)
 	}
 	before, err := r.Events(ctx)
 	if err != nil || len(before) == 0 || before[0].Kind != "contract_test" {
 		t.Fatalf("events %v %v", before, err)
 	}
-	changed := s
-	changed.Cash = dec("500")
+	changed := loaded.copy()
+	changed.Pairs["BTCUSDT"].Cash = dec("500")
 	if r.Commit(ctx, changed, "invalid", make(chan int)) == nil {
 		t.Fatal("invalid event committed")
 	}
 	loaded, err = r.Load(ctx)
-	if err != nil || !loaded.Cash.Equal(s.Cash) {
+	if err != nil || !loaded.Pairs["BTCUSDT"].Cash.Equal(dec("1000")) {
 		t.Fatal("failed commit changed state")
 	}
 	after, _ := r.Events(ctx)
@@ -76,7 +84,7 @@ func TestPostgresRepositoryContract(t *testing.T) {
 	}
 	defer r.Close()
 	state, err := r.Load(ctx)
-	if err != nil || state.Pending == nil || state.Pending.ID != "recovery" {
+	if err != nil || state.Pairs["BTCUSDT"].Pending == nil || state.Pairs["BTCUSDT"].Pending.ID != "recovery" {
 		t.Fatal("restart did not preserve intent", err)
 	}
 }
@@ -115,9 +123,42 @@ func TestMarketMessageValidationAndGap(t *testing.T) {
 	if m.message("BTCUSDT", candle(180000, true)) == nil {
 		t.Fatal("gap accepted")
 	}
-	m.SetPair("ETHUSDT")
-	if m.Snapshot().Connected || !m.Snapshot().QuoteAt.IsZero() || len(m.Snapshot().Candles) > 0 {
-		t.Fatal("pair switch retained stale market")
+	// Frames for another pair must not touch this feed.
+	if err := m.message("ETHUSDT", []byte(`{"data":{"s":"ETHUSDT","b":"1","a":"2"}}`)); err == nil {
+		t.Fatal("wrong-pair frame accepted")
+	}
+	if len(m.Snapshot().Candles) != 1 {
+		t.Fatal("wrong-pair frame mutated candles")
+	}
+}
+
+// Feeds must keep several pairs isolated and drop removed ones.
+func TestFeedsMultiplePairs(t *testing.T) {
+	f := NewFeeds([]string{"BTCUSDT", "ETHUSDT"})
+	btc, eth := f.markets["BTCUSDT"], f.markets["ETHUSDT"]
+	if err := btc.message("BTCUSDT", []byte(`{"data":{"s":"BTCUSDT","b":"100","a":"101"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := eth.message("ETHUSDT", []byte(`{"data":{"s":"ETHUSDT","b":"50","a":"51"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Snapshot("BTCUSDT").Bid.Equal(dec("100")) || !f.Snapshot("ETHUSDT").Bid.Equal(dec("50")) {
+		t.Fatal("pair quotes bled into each other")
+	}
+	if len(f.Pairs()) != 2 {
+		t.Fatal("expected two pairs")
+	}
+	eth.connected = true // a live session marks the feed connected
+	f.SetPairs([]string{"ETHUSDT"})
+	if _, ok := f.markets["BTCUSDT"]; ok {
+		t.Fatal("removed pair retained a feed")
+	}
+	removed := f.Snapshot("BTCUSDT")
+	if removed.Connected || !removed.QuoteAt.IsZero() || len(removed.Candles) > 0 {
+		t.Fatal("removed pair retained stale market data")
+	}
+	if !f.Snapshot("ETHUSDT").Connected || len(f.Pairs()) != 1 {
+		t.Fatal("retained pair lost its feed")
 	}
 }
 func TestExporterFreshnessAndCredentials(t *testing.T) {

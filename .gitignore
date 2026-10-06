@@ -3,6 +3,7 @@
 !.env.example
 data/
 trader
+automated-trader
 bin/
 dist/
 secrets/

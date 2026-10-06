@@ -16,12 +16,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Not configurable: this executable cannot send an order to production Binance.
-const testnetURL = "https://testnet.binance.vision"
-
 type Binance struct {
 	client      *http.Client
 	key, secret string
+	venue       Venue
 }
 
 type APIError struct {
@@ -37,7 +35,7 @@ func (b *Binance) request(ctx context.Context, method, path string, values url.V
 	}
 	if signed {
 		if b.key == "" || b.secret == "" {
-			return fmt.Errorf("testnet credentials missing")
+			return fmt.Errorf("BINANCE_API_KEY and BINANCE_API_SECRET must be set to trade")
 		}
 		values.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
 		values.Set("recvWindow", "5000")
@@ -45,7 +43,7 @@ func (b *Binance) request(ctx context.Context, method, path string, values url.V
 		mac.Write([]byte(values.Encode()))
 		values.Set("signature", hex.EncodeToString(mac.Sum(nil)))
 	}
-	req, err := http.NewRequestWithContext(ctx, method, testnetURL+path+"?"+values.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, method, b.venue.BaseURL+path+"?"+values.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -153,9 +151,14 @@ type Candle struct {
 	Open, High, Low, Close, Volume float64
 }
 
-func (b *Binance) Candles(ctx context.Context, pair string) ([]Candle, error) {
+const decisionIntervalSeconds = 5
+
+func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]Candle, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("candle limit must be 1-1000")
+	}
 	var raw [][]json.RawMessage
-	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {"1m"}, "limit": {"100"}}, false, &raw); err != nil {
+	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {"1m"}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
 		return nil, err
 	}
 	result := []Candle{}
@@ -227,11 +230,16 @@ func (b *Binance) Fees(ctx context.Context, pair string, orderID int64) (map[str
 }
 func (b *Binance) Balances(ctx context.Context) (map[string]decimal.Decimal, error) {
 	var account struct {
-		CanTrade bool
-		Balances []struct{ Asset, Free string }
+		CanTrade    bool
+		CanWithdraw bool
+		CanDeposit  bool
+		Balances    []struct{ Asset, Free string }
 	}
 	if err := b.request(ctx, "GET", "/api/v3/account", nil, true, &account); err != nil {
 		return nil, err
+	}
+	if b.venue.Live && account.CanWithdraw {
+		return nil, fmt.Errorf("live account key may also withdraw funds; withdrawals are outside this bot's use")
 	}
 	if !account.CanTrade {
 		return nil, fmt.Errorf("account cannot trade")

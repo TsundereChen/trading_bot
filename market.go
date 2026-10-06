@@ -14,7 +14,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const testnetStreamURL = "wss://stream.testnet.binance.vision/stream?streams="
+const candleIntervalMS = 60000
 
 type Market struct {
 	mu         sync.RWMutex
@@ -26,6 +26,7 @@ type Market struct {
 	reconnects uint64
 	lastError  string
 }
+
 type MarketSnapshot struct {
 	Pair       string          `json:"pair"`
 	Bid        decimal.Decimal `json:"bid"`
@@ -37,25 +38,87 @@ type MarketSnapshot struct {
 	Candles    []Candle        `json:"-"`
 }
 
+// Feeds owns one Market per configured pair and keeps their subscriptions in
+// sync with the configured pair list.
+type Feeds struct {
+	mu      sync.RWMutex
+	markets map[string]*Market
+	pairs   []string
+}
+
+func NewFeeds(pairs []string) *Feeds {
+	f := &Feeds{markets: map[string]*Market{}, pairs: append([]string(nil), pairs...)}
+	for _, pair := range pairs {
+		f.markets[pair] = &Market{pair: pair}
+	}
+	return f
+}
+
+func (f *Feeds) Pairs() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]string, len(f.pairs))
+	copy(out, f.pairs)
+	sortStrings(out)
+	return out
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+func (f *Feeds) Snapshot(pair string) MarketSnapshot {
+	f.mu.RLock()
+	market, ok := f.markets[pair]
+	f.mu.RUnlock()
+	if !ok {
+		return MarketSnapshot{Pair: pair}
+	}
+	return market.Snapshot()
+}
+
+// SetPairs adds and removes feeds. Removed pairs are marked disconnected so no
+// stale quote can authorize a submission.
+func (f *Feeds) SetPairs(pairs []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wanted := map[string]bool{}
+	for _, pair := range pairs {
+		wanted[pair] = true
+		if _, ok := f.markets[pair]; !ok {
+			f.markets[pair] = &Market{pair: pair}
+		}
+	}
+	for pair, market := range f.markets {
+		if !wanted[pair] {
+			market.mu.Lock()
+			market.connected = false
+			market.quoteAt = time.Time{}
+			market.candles = nil
+			market.mu.Unlock()
+			delete(f.markets, pair)
+		}
+	}
+	f.pairs = append([]string(nil), pairs...)
+}
+
 func (m *Market) Snapshot() MarketSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return MarketSnapshot{m.pair, m.bid, m.ask, m.quoteAt, m.connected, m.reconnects, m.lastError, append([]Candle(nil), m.candles...)}
-}
-func (m *Market) SetPair(pair string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pair = pair
-	m.connected = false
-	m.quoteAt = time.Time{}
-	m.candles = nil
-}
-func (m *Market) validPair(pair string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.pair == pair
+	return MarketSnapshot{
+		Pair: m.pair, Bid: m.bid, Ask: m.ask, QuoteAt: m.quoteAt,
+		Connected: m.connected, Reconnects: m.reconnects, Error: m.lastError,
+		Candles: append([]Candle(nil), m.candles...),
+	}
 }
 
+// message applies one stream frame. Binance field names are case-sensitive on
+// the wire but Go decodes case-insensitively, so every colliding key is declared
+// explicitly to avoid mixing prices with quantities.
 func (m *Market) message(pair string, payload []byte) error {
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
@@ -64,34 +127,32 @@ func (m *Market) message(pair string, payload []byte) error {
 		return err
 	}
 	var event struct {
-		Symbol      string `json:"s"`
-		Bid         string `json:"b"`
-		Ask         string `json:"a"`
-		BidQuantity string `json:"B"`
-		AskQuantity string `json:"A"`
-		Kline       *struct {
-			Closed          bool   `json:"x"`
-			CloseTime       int64  `json:"T"`
-			OpenTime        int64  `json:"t"`
-			Open            string `json:"o"`
-			High            string `json:"h"`
-			Low             string `json:"l"`
-			LastTradeID     int64  `json:"L"`
-			Close           string `json:"c"`
-			Volume          string `json:"v"`
-			TakerBaseVolume string `json:"V"`
+		Symbol string `json:"s"`
+		Bid    string `json:"b"`
+		Ask    string `json:"a"`
+		BidQty string `json:"B"`
+		AskQty string `json:"A"`
+		Kline  *struct {
+			Closed            bool   `json:"x"`
+			OpenTime          int64  `json:"t"`
+			CloseTime         int64  `json:"T"`
+			LastTradeID       int64  `json:"L"`
+			Open              string `json:"o"`
+			High              string `json:"h"`
+			Low               string `json:"l"`
+			Close             string `json:"c"`
+			Volume            string `json:"v"`
+			TakerBuyBaseAsset string `json:"V"`
+			TakerBuyQuote     string `json:"Q"`
 		} `json:"k"`
 	}
 	if err := json.Unmarshal(envelope.Data, &event); err != nil {
 		return err
 	}
-	if event.Symbol != pair {
-		return fmt.Errorf("stream pair mismatch")
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if pair != m.pair {
-		return nil
+	if event.Symbol != m.pair || pair != m.pair {
+		return fmt.Errorf("stream pair mismatch: frame %s, session %s, feed %s", event.Symbol, pair, m.pair)
 	}
 	if event.Kline != nil {
 		k := event.Kline
@@ -105,7 +166,7 @@ func (m *Market) message(pair string, payload []byte) error {
 		}{{k.Open, &c.Open}, {k.High, &c.High}, {k.Low, &c.Low}, {k.Close, &c.Close}, {k.Volume, &c.Volume}} {
 			v, err := strconv.ParseFloat(item.value, 64)
 			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
-				return fmt.Errorf("invalid stream candle")
+				return fmt.Errorf("invalid stream candle value")
 			}
 			*item.dst = v
 		}
@@ -115,10 +176,10 @@ func (m *Market) message(pair string, payload []byte) error {
 		if len(m.candles) > 0 {
 			last := m.candles[len(m.candles)-1].CloseTime
 			if c.CloseTime <= last {
-				return nil
+				return nil // duplicate or out-of-order update
 			}
-			if c.CloseTime-last != 60000 {
-				return fmt.Errorf("candle gap; reconnect and REST resynchronize")
+			if c.CloseTime-last != candleIntervalMS {
+				return fmt.Errorf("candle gap; reconnect to resynchronize")
 			}
 		}
 		m.candles = append(m.candles, c)
@@ -137,7 +198,8 @@ func (m *Market) message(pair string, payload []byte) error {
 }
 
 func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string) error {
-	// Connect before the REST bootstrap so buffered WS candles cover its race window.
+	// Connect before the REST bootstrap so buffered stream candles cover the
+	// race window between the snapshot and the subscription going live.
 	dialer := websocket.Dialer{HandshakeTimeout: 8 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -154,11 +216,11 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 		case <-closed:
 		}
 	}()
-	cs, err := b.Candles(ctx, pair)
+	cs, err := b.Candles(ctx, pair, 100)
 	if err != nil {
 		return err
 	}
-	if _, err = features(cs); err != nil {
+	if _, err := features(cs); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -171,6 +233,7 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 	m.lastError = ""
 	m.quoteAt = time.Time{}
 	m.mu.Unlock()
+
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(90 * time.Second)) })
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -183,7 +246,10 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !m.validPair(pair) {
+				m.mu.RLock()
+				current := m.pair
+				m.mu.RUnlock()
+				if current != pair {
 					conn.Close()
 					return
 				}
@@ -203,26 +269,77 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 		if err != nil {
 			return err
 		}
-		if err = m.message(pair, payload); err != nil {
+		if err := m.message(pair, payload); err != nil {
 			return err
 		}
 	}
 }
-func (m *Market) Run(ctx context.Context, b *Binance) {
+
+// Run supervises configured pairs and keeps supervising pairs added at runtime
+// via SetPairs. A feed exists for as long as the pair is configured.
+func (f *Feeds) Run(ctx context.Context, b *Binance) {
+	supervised := map[string]bool{}
+	done := map[string]chan struct{}{}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		// Start a supervisor for any configured pair not yet supervised.
+		for _, pair := range f.Pairs() {
+			if supervised[pair] {
+				continue
+			}
+			supervised[pair] = true
+			finished := make(chan struct{})
+			done[pair] = finished
+			wg.Add(1)
+			go func(pair string, finished chan struct{}) {
+				defer wg.Done()
+				defer close(finished)
+				f.runPair(ctx, b, pair)
+			}(pair, finished)
+		}
+		// A supervisor exiting means the pair was removed; allow a future
+		// re-add to be supervised again.
+		for pair, finished := range done {
+			select {
+			case <-finished:
+				supervised[pair] = false
+				delete(done, pair)
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		pair := m.Snapshot().Pair
-		stream := strings.ToLower(pair)
-		started := time.Now()
-		err := m.session(ctx, b, pair, testnetStreamURL+stream+"@bookTicker/"+stream+"@kline_1m")
-		m.mu.Lock()
-		m.connected = false
-		m.quoteAt = time.Time{}
-		m.reconnects++
-		if err != nil {
-			m.lastError = err.Error()
+		f.mu.RLock()
+		market, ok := f.markets[pair]
+		f.mu.RUnlock()
+		if !ok {
+			return // pair removed
 		}
-		m.mu.Unlock()
+		stream := strings.ToLower(pair)
+		endpoint := b.venue.StreamURL + "/stream?streams=" + stream + "@bookTicker/" + stream + "@kline_1m"
+		started := time.Now()
+		err := market.session(ctx, b, pair, endpoint)
+		market.mu.Lock()
+		market.connected = false
+		market.quoteAt = time.Time{}
+		market.reconnects++
+		if err != nil {
+			market.lastError = err.Error()
+		}
+		market.mu.Unlock()
 		if time.Since(started) > time.Minute {
 			backoff = time.Second
 		}
@@ -231,6 +348,11 @@ func (m *Market) Run(ctx context.Context, b *Binance) {
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, 30*time.Second)
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
 	}
 }
