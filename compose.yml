@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_DB: trader
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: ${TRADER_IMAGE:-localhost/automated-trader:latest}
+    environment:
+      # libpq keyword DSN avoids URL-encoding the password. See .env.example.
+      DATABASE_URL: "host=postgres port=5432 dbname=trader user=trader password='${POSTGRES_PASSWORD}' sslmode=disable"
+      HTTP_ADDR: 0.0.0.0:8080
+      CONTROL_TOKEN: ${CONTROL_TOKEN:?Set CONTROL_TOKEN in .env}
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in .env}
+      OLLAYA_URL: ${OLLAYA_URL:-http://host.containers.internal:11435}
+      OLLAYA_API_KEY: ${OLLAYA_API_KEY:-}
+      TRADING_PAIR: ${TRADING_PAIR:-BTCUSDT}
+      ENABLE_TESTNET_TRADING: ${ENABLE_TESTNET_TRADING:-false}
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:-}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:-}
+      PAPER_BUDGET: ${PAPER_BUDGET:-1000}
+      MAX_POSITION_QUOTE: ${MAX_POSITION_QUOTE:-100}
+      RISK_PER_TRADE_QUOTE: ${RISK_PER_TRADE_QUOTE:-2.5}
+      DAILY_LOSS_LIMIT_QUOTE: ${DAILY_LOSS_LIMIT_QUOTE:-10}
+    ports:
+      - "${BOT_BIND_IP:-127.0.0.1}:${BOT_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "trader", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  exporter:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: ${TRADER_IMAGE:-localhost/automated-trader:latest}
+    command: ["exporter"]
+    environment:
+      BOT_URL: http://bot:8080
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in .env}
+      EXPORTER_ADDR: 0.0.0.0:9091
+      HEALTHCHECK_URL: http://127.0.0.1:9091/healthz
+    ports:
+      - "${EXPORTER_BIND_IP:-127.0.0.1}:${EXPORTER_PORT:-9091}:9091"
+    depends_on:
+      bot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "trader", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,19 @@
+{
+  "__inputs": [{"name":"DS_PROMETHEUS","label":"Prometheus","type":"datasource","pluginId":"prometheus","pluginName":"Prometheus"}],
+  "title":"Automated Trader — Spot Testnet",
+  "uid":"automated-trader-testnet",
+  "schemaVersion":39,
+  "version":1,
+  "refresh":"5s",
+  "time":{"from":"now-1h","to":"now"},
+  "tags":["trading","testnet"],
+  "panels":[
+    {"id":1,"title":"Allocated equity (USDT)","type":"timeseries","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":0,"y":0,"w":12,"h":8},"targets":[{"refId":"A","expr":"trader_equity_quote{job=\"automated-trader\"}"}]},
+    {"id":2,"title":"Position exposure (USDT)","type":"timeseries","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":12,"y":0,"w":12,"h":8},"targets":[{"refId":"A","expr":"trader_exposure_quote{job=\"automated-trader\"}"}]},
+    {"id":3,"title":"Ollaya p95 latency (seconds)","type":"timeseries","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":0,"y":8,"w":12,"h":8},"targets":[{"refId":"A","expr":"histogram_quantile(0.95, sum by (le) (rate(trader_ollaya_request_duration_seconds_bucket{job=\"automated-trader\"}[5m])))"}],"fieldConfig":{"defaults":{"unit":"s"},"overrides":[]}},
+    {"id":4,"title":"Errors per second", "type":"timeseries","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":12,"y":8,"w":12,"h":8},"targets":[{"refId":"A","expr":"rate(trader_errors_total{job=\"automated-trader\"}[5m])","legendFormat":"{{component}}"}]},
+    {"id":5,"title":"WebSocket quote age", "type":"stat","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":0,"y":16,"w":8,"h":5},"targets":[{"refId":"A","expr":"trader_market_quote_age_seconds{job=\"automated-trader\"}"}],"fieldConfig":{"defaults":{"unit":"s"},"overrides":[]}},
+    {"id":6,"title":"Entries enabled (1 = yes)", "type":"stat","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":8,"y":16,"w":8,"h":5},"targets":[{"refId":"A","expr":"trader_entries_enabled{job=\"automated-trader\"}"}]},
+    {"id":7,"title":"Prometheus target up", "type":"stat","datasource":{"type":"prometheus","uid":"${DS_PROMETHEUS}"},"gridPos":{"x":16,"y":16,"w":8,"h":5},"targets":[{"refId":"A","expr":"up{job=\"automated-trader\"}"}]}
+  ]
+}

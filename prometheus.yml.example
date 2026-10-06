@@ -1,0 +1,5 @@
+scrape_configs:
+  - job_name: automated-trader
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['YOUR_EXPORTER_HOST:9091']

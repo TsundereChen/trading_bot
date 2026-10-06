@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+data
+trader
+*.sqlite*
+*.test
+secrets
+*.db*
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+bin
+dist

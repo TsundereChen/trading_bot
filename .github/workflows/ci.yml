@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: trader_test
+          POSTGRES_USER: trader_test
+          # Disposable CI-only database, not an operational credential.
+          POSTGRES_PASSWORD: ci_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trader_test -d trader_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://trader_test:ci_test_only@localhost:5432/trader_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector and PostgreSQL
+        run: go test -race -count=1 ./...
+      - name: Build
+        run: go build -trimpath -o /tmp/trader .
+
+  container:
+    name: Container image build
+    needs: go
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no registry push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: false
+          load: true
+          tags: trading-bot:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
