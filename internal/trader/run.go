@@ -97,13 +97,14 @@ func Run() error {
 	reg := prometheus.NewRegistry()
 	modelClient := &http.Client{Timeout: cfg.modelTimeout() + time.Second, CheckRedirect: client.CheckRedirect}
 	reg.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
-	a := &App{cfg: cfg, repo: repo, binance: b, feeds: NewFeeds(state.symbols(), cfg.SignalInterval), client: modelClient, state: state, symbols: symbols, lastDecisions: map[string]any{}, accountID: accountID, metrics: newMetrics(reg)}
+	a := &App{cfg: cfg, repo: repo, binance: b, feeds: NewFeeds(state.symbols(), cfg.SignalInterval, cfg.ContextInterval), client: modelClient, state: state, symbols: symbols, lastDecisions: map[string]any{}, accountID: accountID, metrics: newMetrics(reg)}
 	server := &http.Server{Addr: cfg.Listen, Handler: a.routes(reg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan struct{})
 	go func() { defer close(done); a.Run(ctx) }()
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.ListenAndServe() }()
 	slog.Info("trader started", "listen", cfg.Listen, "venue", cfg.Venue.Name, "trading_enabled", cfg.Trading, "entries", "paused until start command", "model", cfg.OllayaModel, "pairs", state.symbols())
+	slog.Info("signal windows configured", "signal_interval", cfg.SignalInterval, "context_interval", cfg.ContextInterval, "completed_candles_only", true)
 	slog.Info("strategy configured", "signal_interval", cfg.SignalInterval, "entry_policy", cfg.EntryPolicy, "model_cadence", "sequential_all_pairs", "model_round_interval_seconds", cfg.decisionSeconds(), "model_timeout_seconds", cfg.modelTimeout().Seconds(), "reentry_cooldown_seconds", cfg.cooldown().Seconds(), "monitor_interval_seconds", 5, "per_pair_budget", cfg.PerPairBudget.String(), "max_position", cfg.MaxPosition.String(), "risk_per_trade", cfg.RiskPerTrade.String(), "daily_loss_limit", cfg.DailyLoss.String())
 	if cfg.Venue.Live {
 		slog.Warn("LIVE VENUE: real funds are at risk", "base_url", cfg.Venue.BaseURL)

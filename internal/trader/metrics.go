@@ -67,7 +67,7 @@ func (a *App) refreshMetrics() {
 		if !m.QuoteAt.IsZero() {
 			age = time.Since(m.QuoteAt).Seconds()
 		}
-		if fresh && !p.Paused && p.Pending == nil && len(p.UnvaluedFees) == 0 && !a.fatal && a.cfg.Trading {
+		if fresh && !p.Paused && p.Pending == nil && len(p.UnvaluedFees) == 0 && !a.fatal && a.cfg.Trading && (a.cfg.ContextInterval == "" || contextReady(m, a.cfg.ContextInterval)) {
 			running = 1
 		}
 		equity, exposure := p.equity(decimal.Zero).InexactFloat64(), 0.0

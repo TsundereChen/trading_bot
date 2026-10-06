@@ -11,6 +11,8 @@ import (
 func (m *Metrics) registerPerformance(reg *prometheus.Registry) {
 	m.Performance = map[string]*prometheus.GaugeVec{}
 	definitions := map[string]string{
+		"context_ready":                        "One if higher-timeframe completed-candle features are available and fresh",
+		"context_candle_age_seconds":           "Age of latest completed context candle; +Inf before bootstrap",
 		"realized_pnl_quote":                   "Cost-basis realized PnL after quote/base fees and estimated third-asset fees since tracking began; NaN with unvalued fees",
 		"unrealized_pnl_quote":                 "Mark-to-bid minus remaining position/dust cost basis; NaN with stale valuation",
 		"net_pnl_quote":                        "Realized plus unrealized PnL since tracking began, after accounted fees",
@@ -60,6 +62,17 @@ func (m *Metrics) registerPerformance(reg *prometheus.Registry) {
 
 func (a *App) publishPerformance(pair, quote string, p *Position, market MarketSnapshot, fresh bool, equity float64) {
 	set := func(name string, value float64) { a.metrics.Performance[name].WithLabelValues(pair, quote).Set(value) }
+	ready, contextAge := 0.0, math.Inf(1)
+	if a.cfg.ContextInterval != "" {
+		if contextReady(market, a.cfg.ContextInterval) {
+			ready = 1
+		}
+		if len(market.ContextCandles) > 0 {
+			contextAge = time.Since(time.UnixMilli(market.ContextCandles[len(market.ContextCandles)-1].CloseTime)).Seconds()
+		}
+	}
+	set("context_ready", ready)
+	set("context_candle_age_seconds", contextAge)
 	float := func(d decimal.Decimal) float64 { return d.InexactFloat64() }
 	entry := 0.0
 	if p.Qty.IsPositive() {

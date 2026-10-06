@@ -23,6 +23,11 @@ func (a *App) askOllaya(ctx context.Context, pair string, snapshot map[string]an
 		questions["action"] = map[string]any{"type": "choice", "instructions": "Choose only from allowed_actions. ENTER_LONG requires entry_eligible=true, but no EMA trend or pullback is mandatory. Judge whether supplied quotes and completed-candle features support a small long trade after spread and estimated fees. EXIT_LONG requires an existing tracked position; a trend reversal is not mandatory. HOLD when evidence is weak or costs outweigh the opportunity; do not trade simply to increase frequency. Model probabilities are not probabilities of profit.", "criteria": map[string]string{"ENTER_LONG": "Open a small eligible long", "EXIT_LONG": "Close the tracked long", "HOLD": "Wait; no order"}}
 		questions["setup_quality"] = map[string]any{"type": "score", "instructions": "Rate the evidence for a small long after estimated transaction costs, not the match to a required pullback and not guaranteed profitability.", "criteria": []string{"Poor", "Weak", "Moderate", "Strong"}}
 	}
+	if a.cfg.ContextInterval != "" {
+		action := questions["action"].(map[string]any)
+		action["instructions"] = action["instructions"].(string) + " Use features on signal_interval for entry/exit timing and market_context.features for the higher-timeframe trend and volatility backdrop. Weigh agreement or conflict between timeframes; higher-timeframe uptrend is not a mandatory entry gate. Both windows contain only completed candles."
+		questions["regime"] = map[string]any{"type": "choice", "instructions": "Classify the higher-timeframe market regime using market_context.features; distinguish it from short-term signal features.", "criteria": map[string]string{"UPTREND": "Higher-timeframe EMA20 above EMA50", "DOWNTREND": "Higher-timeframe EMA20 below EMA50", "RANGE": "No clear higher-timeframe trend"}}
+	}
 	body, err := json.Marshal(map[string]any{"model": a.cfg.OllayaModel, "state": snapshot, "questions": questions, "keep_alive": "10m"})
 	if err != nil {
 		return nil, err

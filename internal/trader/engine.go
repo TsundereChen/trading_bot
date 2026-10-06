@@ -72,7 +72,7 @@ func (a *App) Run(ctx context.Context) {
 				if time.Since(lastHeartbeat) >= 30*time.Second {
 					for pair, p := range a.snapshot().Pairs {
 						m := a.feeds.Snapshot(pair)
-						slog.Info("monitor heartbeat", "pair", pair, "quote_fresh", freshMarket(m, pair), "paused", p.Paused, "quantity", p.Qty.String(), "pending_order", p.Pending != nil, "native_stop", p.Protection != nil, "last_decision_candle", p.LastDecisionCandle)
+						slog.Info("monitor heartbeat", "pair", pair, "quote_fresh", freshMarket(m, pair), "paused", p.Paused, "quantity", p.Qty.String(), "pending_order", p.Pending != nil, "native_stop", p.Protection != nil, "last_decision_candle", p.LastDecisionCandle, "context_interval", a.cfg.ContextInterval, "context_ready", a.cfg.ContextInterval != "" && contextReady(m, a.cfg.ContextInterval), "context_close_time", m.ContextCloseTime)
 					}
 					lastHeartbeat = time.Now()
 				}

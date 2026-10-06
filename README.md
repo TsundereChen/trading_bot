@@ -66,6 +66,7 @@ The active small-trade trial and new deployment defaults use this profile:
 ```sh
 TRADING_PAIRS=BTCUSDT,BTCUSDC,ETHUSDT,ETHUSDC
 SIGNAL_INTERVAL=1m
+CONTEXT_INTERVAL=5m
 ENTRY_POLICY=ollaya
 DECISION_INTERVAL_SECONDS=30
 OLLAYA_TIMEOUT_SECONDS=20
@@ -119,6 +120,25 @@ Keep it off the public internet; use `HTTP_ADDR` and TLS plus firewall rules for
 Starting multiple pairs is all-or-nothing after revalidation. Closing multiple pairs pauses them together, then reports per-pair results; exchange orders themselves cannot be a transactional batch. HTTP 409 can indicate a busy, unresolved, or residual/dust position. Pause does not cancel native protection. Only one API backtest runs at a time.
 
 ## Monitoring, containers, backtesting
+
+### Signal windows
+
+The default model input combines **1-minute signals with 5-minute context**.
+`SIGNAL_INTERVAL=1m` drives short-term features and ATR-based stop/target sizing;
+`CONTEXT_INTERVAL=5m` supplies a separate EMA/trend/volatility feature set to
+Ollaya as `market_context`. Each window retains up to 100 completed candles
+(roughly 100 minutes and 500 minutes of history), with independent REST
+bootstrap, stream updates, and freshness validation. Unfinished 5-minute bars
+never influence the context. Context informs Ollaya's judgment, not a mandatory
+trend filter; a higher-timeframe downtrend does not mechanically block entry.
+
+Missing, invalid, or stale context skips that pair's model evaluation with
+`context_unavailable`; a context bar changing during inference blocks a new
+entry with `context_changed`. Independent reconciliation, native stops, and
+protective exits continue. `trader_context_ready`,
+`trader_context_candle_age_seconds`, status `context_interval`/`context_close_time`,
+and the heartbeat expose context freshness. Rounds still evaluate every pair
+sequentially every 30 seconds; context updates only on completed 5-minute bars.
 
 Compose starts **bot, PostgreSQL, and exporter together**. The exporter uses
 the same image with the `exporter` command; the bot serves its authenticated

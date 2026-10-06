@@ -24,38 +24,43 @@ func freshMarket(m MarketSnapshot, pair string) bool {
 }
 
 type Market struct {
-	mu         sync.RWMutex
-	pair       string
-	interval   string
-	bid, ask   decimal.Decimal
-	quoteAt    time.Time
-	candles    []strategy.Candle
-	connected  bool
-	reconnects uint64
-	lastError  string
-	removed    bool
-	cancel     context.CancelFunc
-	done       chan struct{}
+	mu              sync.RWMutex
+	pair            string
+	interval        string
+	contextInterval string
+	bid, ask        decimal.Decimal
+	quoteAt         time.Time
+	candles         []strategy.Candle
+	contextCandles  []strategy.Candle
+	connected       bool
+	reconnects      uint64
+	lastError       string
+	removed         bool
+	cancel          context.CancelFunc
+	done            chan struct{}
 }
 
 type MarketSnapshot struct {
-	Pair       string            `json:"pair"`
-	Bid        decimal.Decimal   `json:"bid"`
-	Ask        decimal.Decimal   `json:"ask"`
-	QuoteAt    time.Time         `json:"quote_received_at"`
-	Connected  bool              `json:"connected"`
-	Reconnects uint64            `json:"reconnects"`
-	Error      string            `json:"error"`
-	Candles    []strategy.Candle `json:"-"`
+	Pair             string            `json:"pair"`
+	Bid              decimal.Decimal   `json:"bid"`
+	Ask              decimal.Decimal   `json:"ask"`
+	QuoteAt          time.Time         `json:"quote_received_at"`
+	Connected        bool              `json:"connected"`
+	Reconnects       uint64            `json:"reconnects"`
+	Error            string            `json:"error"`
+	Candles          []strategy.Candle `json:"-"`
+	ContextCandles   []strategy.Candle `json:"-"`
+	ContextCloseTime int64             `json:"context_close_time"`
 }
 
 // Feeds owns one Market per configured pair and keeps their subscriptions in
 // sync with the configured pair list.
 type Feeds struct {
-	mu       sync.RWMutex
-	markets  map[string]*Market
-	pairs    []string
-	interval string
+	mu              sync.RWMutex
+	markets         map[string]*Market
+	pairs           []string
+	interval        string
+	contextInterval string
 }
 
 func NewFeeds(pairs []string, interval ...string) *Feeds {
@@ -63,8 +68,11 @@ func NewFeeds(pairs []string, interval ...string) *Feeds {
 	if len(interval) > 0 {
 		f.interval = interval[0]
 	}
+	if len(interval) > 1 {
+		f.contextInterval = interval[1]
+	}
 	for _, pair := range pairs {
-		f.markets[pair] = &Market{pair: pair, interval: f.interval, done: make(chan struct{})}
+		f.markets[pair] = &Market{pair: pair, interval: f.interval, contextInterval: f.contextInterval, done: make(chan struct{})}
 	}
 	return f
 }
@@ -97,7 +105,7 @@ func (f *Feeds) SetPairs(pairs []string) {
 	for _, pair := range pairs {
 		wanted[pair] = true
 		if _, ok := f.markets[pair]; !ok {
-			f.markets[pair] = &Market{pair: pair, interval: f.interval, done: make(chan struct{})}
+			f.markets[pair] = &Market{pair: pair, interval: f.interval, contextInterval: f.contextInterval, done: make(chan struct{})}
 		}
 	}
 	for pair, market := range f.markets {
@@ -113,6 +121,7 @@ func (f *Feeds) SetPairs(pairs []string) {
 			market.connected = false
 			market.quoteAt = time.Time{}
 			market.candles = nil
+			market.contextCandles = nil
 			market.mu.Unlock()
 			delete(f.markets, pair)
 		}
@@ -123,10 +132,19 @@ func (f *Feeds) SetPairs(pairs []string) {
 func (m *Market) Snapshot() MarketSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	contextCandles := m.contextCandles
+	if m.contextInterval != "" && m.contextInterval == signalInterval(m.interval) {
+		contextCandles = m.candles
+	}
+	closeTime := int64(0)
+	if len(contextCandles) > 0 {
+		closeTime = contextCandles[len(contextCandles)-1].CloseTime
+	}
 	return MarketSnapshot{
 		Pair: m.pair, Bid: m.bid, Ask: m.ask, QuoteAt: m.quoteAt,
 		Connected: m.connected, Reconnects: m.reconnects, Error: m.lastError,
-		Candles: append([]strategy.Candle(nil), m.candles...),
+		Candles:        append([]strategy.Candle(nil), m.candles...),
+		ContextCandles: append([]strategy.Candle(nil), contextCandles...), ContextCloseTime: closeTime,
 	}
 }
 
@@ -174,13 +192,21 @@ func (m *Market) message(pair string, payload []byte) error {
 	}
 	if event.Kline != nil {
 		k := event.Kline
-		if k.Interval != "" && k.Interval != signalInterval(m.interval) {
-			return fmt.Errorf("stream candle interval mismatch")
+		interval := signalInterval(m.interval)
+		candles := &m.candles
+		if k.Interval != "" && k.Interval != interval {
+			if m.contextInterval == "" || k.Interval != m.contextInterval {
+				return fmt.Errorf("stream candle interval mismatch")
+			}
+			interval, candles = m.contextInterval, &m.contextCandles
 		}
 		if !k.Closed {
 			return nil
 		}
 		c := strategy.Candle{CloseTime: k.CloseTime}
+		if c.CloseTime >= time.Now().UnixMilli() {
+			return fmt.Errorf("stream completed candle has future close time")
+		}
 		for _, item := range []struct {
 			value string
 			dst   *float64
@@ -194,18 +220,18 @@ func (m *Market) message(pair string, payload []byte) error {
 		if err := strategy.ValidateCandle(c); err != nil {
 			return err
 		}
-		if len(m.candles) > 0 {
-			last := m.candles[len(m.candles)-1].CloseTime
+		if len(*candles) > 0 {
+			last := (*candles)[len(*candles)-1].CloseTime
 			if c.CloseTime <= last {
 				return nil // duplicate or out-of-order update
 			}
-			if c.CloseTime-last != candleDuration(m.interval).Milliseconds() {
+			if c.CloseTime-last != candleDuration(interval).Milliseconds() {
 				return fmt.Errorf("candle gap; reconnect to resynchronize")
 			}
 		}
-		m.candles = append(m.candles, c)
-		if len(m.candles) > 100 {
-			m.candles = m.candles[len(m.candles)-100:]
+		*candles = append(*candles, c)
+		if len(*candles) > 100 {
+			*candles = (*candles)[len(*candles)-100:]
 		}
 		return nil
 	}
@@ -254,12 +280,23 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 	if _, err := features(cs, b.interval); err != nil {
 		return err
 	}
+	var contextCandles []strategy.Candle
+	if m.contextInterval != "" && m.contextInterval != signalInterval(m.interval) {
+		contextCandles, err = b.Candles(ctx, pair, 100, m.contextInterval)
+		if err != nil {
+			return err
+		}
+		if _, err := features(contextCandles, m.contextInterval); err != nil {
+			return fmt.Errorf("context bootstrap: %w", err)
+		}
+	}
 	m.mu.Lock()
 	if m.pair != pair || m.removed {
 		m.mu.Unlock()
 		return nil
 	}
 	m.candles = cs
+	m.contextCandles = contextCandles
 	m.connected = true
 	m.lastError = ""
 	m.quoteAt = time.Time{}
@@ -368,6 +405,9 @@ func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
 		}
 		stream := strings.ToLower(pair)
 		endpoint := b.venue.StreamURL + "/stream?streams=" + stream + "@bookTicker/" + stream + "@kline_" + signalInterval(f.interval)
+		if f.contextInterval != "" && f.contextInterval != signalInterval(f.interval) {
+			endpoint += "/" + stream + "@kline_" + f.contextInterval
+		}
 		started := time.Now()
 		err := market.session(ctx, b, pair, endpoint)
 		market.mu.Lock()

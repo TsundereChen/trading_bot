@@ -16,6 +16,7 @@ type Config struct {
 	DecisionSeconds, ModelTimeoutSeconds, CooldownSeconds int
 	EntryPolicy                                           string
 	SignalInterval                                        string
+	ContextInterval                                       string
 	OllayaModel                                           string
 	Database, Listen, OllayaURL, OllayaKey, ControlToken  string
 	DatabaseURL, MetricsToken, BindingConfirmation        string
@@ -42,6 +43,7 @@ func config() (Config, error) {
 		OllayaKey:           os.Getenv("OLLAYA_API_KEY"),
 		OllayaModel:         strings.TrimSpace(env("OLLAYA_MODEL", "winnow:e4b")),
 		SignalInterval:      strings.TrimSpace(env("SIGNAL_INTERVAL", "1m")),
+		ContextInterval:     strings.TrimSpace(env("CONTEXT_INTERVAL", "5m")),
 		EntryPolicy:         env("ENTRY_POLICY", "ollaya"),
 		ControlToken:        os.Getenv("CONTROL_TOKEN"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
@@ -76,6 +78,9 @@ func config() (Config, error) {
 	}
 	if c.SignalInterval != "1m" && c.SignalInterval != "5m" {
 		return c, fmt.Errorf("SIGNAL_INTERVAL must be 1m or 5m")
+	}
+	if c.ContextInterval != "5m" {
+		return c, fmt.Errorf("CONTEXT_INTERVAL must be 5m")
 	}
 	if c.OllayaModel == "" {
 		return c, fmt.Errorf("OLLAYA_MODEL must not be blank")

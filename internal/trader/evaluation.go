@@ -22,6 +22,7 @@ type Evaluation struct {
 }
 
 type submissionObservation struct {
+	ContextSetupID      int64
 	ClientID            string
 	Accepted, Uncertain bool
 }
@@ -51,6 +52,10 @@ func executionReason(err error) string {
 	}
 	text := err.Error()
 	switch {
+	case strings.Contains(text, "context changed"):
+		return "context_changed"
+	case strings.Contains(text, "context"):
+		return "context_unavailable"
 	case strings.Contains(text, "balance"):
 		return "insufficient_balance"
 	case strings.Contains(text, "risk allocation"):
@@ -86,6 +91,8 @@ func entryBlockReason(p *Position, c Config, m MarketSnapshot, f strategy.Featur
 		return "stale_quote"
 	case !signalsValid:
 		return "invalid_candles"
+	case c.ContextInterval != "" && !contextReady(m, c.ContextInterval):
+		return "context_unavailable"
 	case time.Now().Before(p.CooldownUntil):
 		return "cooldown"
 	case m.Ask.Sub(m.Bid).Div(m.Bid).Mul(decimal.NewFromInt(10000)).GreaterThan(decimal.NewFromInt(10)):

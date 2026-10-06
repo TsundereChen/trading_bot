@@ -243,12 +243,19 @@ func (b *Binance) Book(ctx context.Context, pair string) (Book, error) {
 	return book, err
 }
 
-func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]strategy.Candle, error) {
+func (b *Binance) Candles(ctx context.Context, pair string, limit int, override ...string) ([]strategy.Candle, error) {
+	interval := signalInterval(b.interval)
+	if len(override) > 0 {
+		interval = override[0]
+	}
+	if interval != "1m" && interval != "5m" {
+		return nil, fmt.Errorf("unsupported candle interval")
+	}
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("candle limit must be 1-1000")
 	}
 	var raw [][]json.RawMessage
-	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {signalInterval(b.interval)}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
+	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {interval}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
 		return nil, err
 	}
 	result := []strategy.Candle{}
@@ -277,7 +284,7 @@ func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]strate
 		if err := strategy.ValidateCandle(c); err != nil {
 			return nil, err
 		}
-		if len(result) > 0 && c.CloseTime-result[len(result)-1].CloseTime != candleDuration(b.interval).Milliseconds() {
+		if len(result) > 0 && c.CloseTime-result[len(result)-1].CloseTime != candleDuration(interval).Milliseconds() {
 			return nil, fmt.Errorf("non-consecutive REST candles")
 		}
 		result = append(result, c)

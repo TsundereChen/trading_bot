@@ -32,6 +32,9 @@ func checkQuantity(symbol Symbol, qty, bid, ask decimal.Decimal) error {
 }
 
 func (a *App) checkEntryAllocation(p *Position, qty decimal.Decimal, m MarketSnapshot, freeQuote decimal.Decimal) error {
+	if a.cfg.ContextInterval != "" && !contextReady(m, a.cfg.ContextInterval) {
+		return fmt.Errorf("context candles unavailable or stale")
+	}
 	cost := qty.Mul(m.Ask).Mul(decimal.NewFromFloat(1.01))
 	if freeQuote.LessThan(cost) {
 		return fmt.Errorf("insufficient free quote balance")
@@ -81,6 +84,9 @@ func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.D
 		return err
 	}
 	if side == "BUY" {
+		if len(observation) > 0 && observation[0].ContextSetupID > 0 && (len(m.ContextCandles) == 0 || m.ContextCandles[len(m.ContextCandles)-1].CloseTime != observation[0].ContextSetupID) {
+			return fmt.Errorf("context changed during entry preflight")
+		}
 		if err := a.checkEntryAllocation(p, qty, m, balances[symbol.Quote]); err != nil {
 			return err
 		}
@@ -114,6 +120,9 @@ func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.D
 			return err
 		}
 		if side == "BUY" {
+			if len(observation) > 0 && observation[0].ContextSetupID > 0 && (len(currentMarket.ContextCandles) == 0 || currentMarket.ContextCandles[len(currentMarket.ContextCandles)-1].CloseTime != observation[0].ContextSetupID) {
+				return fmt.Errorf("context changed during entry preflight")
+			}
 			if err := a.checkEntryAllocation(pos, qty, currentMarket, balances[symbol.Quote]); err != nil {
 				return err
 			}

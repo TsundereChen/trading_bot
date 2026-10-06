@@ -29,6 +29,9 @@ func (a *App) decisionSnapshot(pair string, p *Position, f strategy.Features, ma
 	bid, ask := market.Bid, market.Ask
 	spread := ask.Sub(bid).Div(bid).Mul(decimal.NewFromInt(10000)).InexactFloat64()
 	eligible := !p.Paused && p.Qty.IsZero() && p.Pending == nil && p.Protection == nil && len(p.UnvaluedFees) == 0 && spread <= 10 && time.Now().After(p.CooldownUntil)
+	if a.cfg.ContextInterval != "" {
+		eligible = eligible && contextReady(market, a.cfg.ContextInterval)
+	}
 	if a.cfg.EntryPolicy != "ollaya" {
 		eligible = eligible && f.Uptrend && f.Pullback && f.SetupID != p.LastSetup
 	}
@@ -68,6 +71,16 @@ func (a *App) decide(ctx context.Context, pair string) {
 		slog.Warn("decision skipped", "pair", pair, "reason", "completed candles unavailable or invalid")
 		return
 	}
+	var contextSignals strategy.Features
+	if a.cfg.ContextInterval != "" {
+		contextSignals, err = contextFeatures(m, a.cfg.ContextInterval)
+		if err != nil {
+			evaluation.Reason = "context_unavailable"
+			a.metrics.Failures.WithLabelValues("context_signals").Inc()
+			slog.Warn("decision skipped", "pair", pair, "reason", "context candles unavailable, invalid or stale")
+			return
+		}
+	}
 	// Track the candle for diagnostics, but never use it to throttle inference.
 	// Quotes and positions can change many times within one signal candle.
 	claimed := false
@@ -92,6 +105,9 @@ func (a *App) decide(ctx context.Context, pair string) {
 	input := a.decisionSnapshot(pair, p, f, m)
 	input["signal_interval"] = signalInterval(a.cfg.SignalInterval)
 	input["entry_policy"] = a.cfg.EntryPolicy
+	if a.cfg.ContextInterval != "" {
+		input["market_context"] = map[string]any{"interval": a.cfg.ContextInterval, "completed_candle_close_time": m.ContextCandles[len(m.ContextCandles)-1].CloseTime, "features": contextSignals}
+	}
 	if symbol, ok := a.symbolFor(pair); ok {
 		input["quote_asset"] = symbol.Quote
 	}
@@ -163,6 +179,17 @@ func (a *App) decide(ctx context.Context, pair string) {
 		evaluation.Reason = "signal_changed"
 		return
 	}
+	if action == "ENTER_LONG" && a.cfg.ContextInterval != "" {
+		latestContext, err := contextFeatures(m, a.cfg.ContextInterval)
+		if err != nil {
+			evaluation.Reason = "context_unavailable"
+			return
+		}
+		if latestContext.SetupID != contextSignals.SetupID {
+			evaluation.Reason = "context_changed"
+			return
+		}
+	}
 	if action == "EXIT_LONG" && current.Qty.IsPositive() && (a.cfg.EntryPolicy == "ollaya" || latest.Reversal) {
 		if err := a.closeUnderGate(ctx, pair, "model_exit", observation); err != nil {
 			evaluation.Outcome, evaluation.Reason = "failed", executionReason(err)
@@ -212,6 +239,7 @@ func (a *App) decide(ctx context.Context, pair string) {
 	}); err != nil {
 		return
 	}
+	observation.ContextSetupID = contextSignals.SetupID
 	if err := a.submitMarket(ctx, pair, "BUY", qty, "model_entry", observation); err != nil {
 		evaluation.Outcome, evaluation.Reason = "failed", executionReason(err)
 		if observation.Uncertain {
