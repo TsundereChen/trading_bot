@@ -98,7 +98,7 @@ func (a *App) cancelProtection(ctx context.Context, pair string) error {
 	return nil
 }
 
-func (a *App) closeUnderGate(ctx context.Context, pair, reason string) error {
+func (a *App) closeUnderGate(ctx context.Context, pair, reason string, observation ...*submissionObservation) error {
 	if !a.executionAllowed() {
 		return fmt.Errorf("execution disabled or identity unverified")
 	}
@@ -113,7 +113,7 @@ func (a *App) closeUnderGate(ctx context.Context, pair, reason string) error {
 	if p == nil || !p.Qty.IsPositive() {
 		return nil
 	}
-	if err := a.submitMarket(ctx, pair, "SELL", p.Qty, reason); err != nil {
+	if err := a.submitMarket(ctx, pair, "SELL", p.Qty, reason, observation...); err != nil {
 		// If no sell was sent, restore protection even if the quote feed failed.
 		// Uncertain sells retain Pending and must not get a second sell order.
 		if pos := a.snapshot().Pairs[pair]; pos != nil && pos.Pending == nil && pos.Protection == nil && pos.Qty.IsPositive() {

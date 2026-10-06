@@ -27,7 +27,7 @@ func (a *App) dispatchPoll(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // Synchronous wrapper used by tests; Run dispatches independently so a slow
-// pair does not stretch another pair's one-second reconciliation schedule.
+// pair does not stretch another pair's five-second reconciliation schedule.
 func (a *App) poll(ctx context.Context) {
 	var wg sync.WaitGroup
 	a.dispatchPoll(ctx, &wg)
@@ -74,6 +74,21 @@ func (a *App) pollPair(ctx context.Context, pair string) {
 	}
 	m := a.feeds.Snapshot(pair)
 	if freshMarket(m, pair) {
+		if len(p.UnvaluedFees) == 0 {
+			if err := a.update(workCtx, "performance_mark", map[string]string{"pair": pair}, func(s State) error {
+				pos := s.Pairs[pair]
+				if pos == nil {
+					return errNoChange
+				}
+				initialized := pos.Performance == nil
+				if !markPerformance(pos, m.Bid) && !initialized {
+					return errNoChange
+				}
+				return nil
+			}); err != nil {
+				return
+			}
+		}
 		day := time.Now().UTC().Format("2006-01-02")
 		if p.Day != day && len(p.UnvaluedFees) == 0 {
 			if err := a.update(workCtx, "day_rollover", map[string]any{"pair": pair}, func(s State) error {

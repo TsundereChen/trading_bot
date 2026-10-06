@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"automated-trader/internal/strategy"
 
@@ -12,14 +13,18 @@ import (
 )
 
 type Config struct {
-	Database, Listen, OllayaURL, OllayaKey, ControlToken string
-	DatabaseURL, MetricsToken, BindingConfirmation       string
-	Trading                                              bool
-	PerPairBudget, MaxPosition, RiskPerTrade, DailyLoss  decimal.Decimal
-	MaxPairs                                             int
-	AuditDays, AuditMaxEvents                            int
-	Venue                                                Venue
-	Pairs                                                []string
+	DecisionSeconds, ModelTimeoutSeconds, CooldownSeconds int
+	EntryPolicy                                           string
+	SignalInterval                                        string
+	OllayaModel                                           string
+	Database, Listen, OllayaURL, OllayaKey, ControlToken  string
+	DatabaseURL, MetricsToken, BindingConfirmation        string
+	Trading                                               bool
+	PerPairBudget, MaxPosition, RiskPerTrade, DailyLoss   decimal.Decimal
+	MaxPairs                                              int
+	AuditDays, AuditMaxEvents                             int
+	Venue                                                 Venue
+	Pairs                                                 []string
 }
 
 func env(key, fallback string) string {
@@ -35,14 +40,47 @@ func config() (Config, error) {
 		Listen:              env("HTTP_ADDR", "127.0.0.1:8080"),
 		OllayaURL:           env("OLLAYA_URL", "http://127.0.0.1:11435"),
 		OllayaKey:           os.Getenv("OLLAYA_API_KEY"),
+		OllayaModel:         strings.TrimSpace(env("OLLAYA_MODEL", "winnow:e4b")),
+		SignalInterval:      strings.TrimSpace(env("SIGNAL_INTERVAL", "1m")),
+		EntryPolicy:         env("ENTRY_POLICY", "ollaya"),
 		ControlToken:        os.Getenv("CONTROL_TOKEN"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
 		Trading:             strings.EqualFold(os.Getenv("ENABLE_TRADING"), "true"),
 		MaxPairs:            8,
 		BindingConfirmation: os.Getenv("STATE_BINDING_CONFIRM"),
 	}
-	c.MetricsToken = env("METRICS_TOKEN", c.ControlToken)
-	pairs, err := parsePairs(env("TRADING_PAIRS", "BTCUSDT"))
+	c.MetricsToken = os.Getenv("METRICS_TOKEN")
+	if c.MetricsToken != "" && c.MetricsToken == c.ControlToken {
+		return c, fmt.Errorf("METRICS_TOKEN must differ from CONTROL_TOKEN so the exporter cannot control trading")
+	}
+	if c.EntryPolicy != "pullback" && c.EntryPolicy != "ollaya" {
+		return c, fmt.Errorf("ENTRY_POLICY must be pullback or ollaya")
+	}
+	for _, item := range []struct {
+		key, fallback string
+		dest          *int
+		max           int
+	}{
+		{"DECISION_INTERVAL_SECONDS", "30", &c.DecisionSeconds, 300},
+		{"OLLAYA_TIMEOUT_SECONDS", "20", &c.ModelTimeoutSeconds, 299},
+		{"REENTRY_COOLDOWN_SECONDS", "10", &c.CooldownSeconds, 3600},
+	} {
+		n, err := strconv.Atoi(env(item.key, item.fallback))
+		if err != nil || n < 1 || n > item.max {
+			return c, fmt.Errorf("%s must be between 1 and %d", item.key, item.max)
+		}
+		*item.dest = n
+	}
+	if c.ModelTimeoutSeconds >= c.DecisionSeconds {
+		return c, fmt.Errorf("OLLAYA_TIMEOUT_SECONDS must be less than DECISION_INTERVAL_SECONDS")
+	}
+	if c.SignalInterval != "1m" && c.SignalInterval != "5m" {
+		return c, fmt.Errorf("SIGNAL_INTERVAL must be 1m or 5m")
+	}
+	if c.OllayaModel == "" {
+		return c, fmt.Errorf("OLLAYA_MODEL must not be blank")
+	}
+	pairs, err := parsePairs(env("TRADING_PAIRS", "BTCUSDT,BTCUSDC,ETHUSDT,ETHUSDC"))
 	if err != nil {
 		return c, err
 	}
@@ -63,10 +101,10 @@ func config() (Config, error) {
 		key, fallback string
 		dest          *decimal.Decimal
 	}{
-		{"PER_PAIR_BUDGET", "1000", &c.PerPairBudget},
-		{"MAX_POSITION_QUOTE", "100", &c.MaxPosition},
-		{"RISK_PER_TRADE_QUOTE", "2.5", &c.RiskPerTrade},
-		{"DAILY_LOSS_LIMIT_QUOTE", "10", &c.DailyLoss},
+		{"PER_PAIR_BUDGET", "4000", &c.PerPairBudget},
+		{"MAX_POSITION_QUOTE", "20", &c.MaxPosition},
+		{"RISK_PER_TRADE_QUOTE", "0.1", &c.RiskPerTrade},
+		{"DAILY_LOSS_LIMIT_QUOTE", "400", &c.DailyLoss},
 	} {
 		d, err := decimal.NewFromString(env(item.key, item.fallback))
 		if err != nil || !d.IsPositive() || !strategy.BoundedDecimal(d) {
@@ -105,14 +143,14 @@ func parsePairs(raw string) ([]string, error) {
 		if pair == "" {
 			continue
 		}
-		valid := strings.HasSuffix(pair, "USDT") && len(pair) >= 7 && len(pair) <= 32
+		valid := (strings.HasSuffix(pair, "USDT") || strings.HasSuffix(pair, "USDC")) && len(pair) >= 7 && len(pair) <= 32
 		for _, c := range pair {
 			if !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') {
 				valid = false
 			}
 		}
 		if !valid {
-			return nil, fmt.Errorf("TRADING_PAIRS entries must be alphanumeric USDT spot pairs, got %q", pair)
+			return nil, fmt.Errorf("TRADING_PAIRS entries must be alphanumeric USDT/USDC spot pairs, got %q", pair)
 		}
 		if !seen[pair] {
 			seen[pair] = true
@@ -120,10 +158,33 @@ func parsePairs(raw string) ([]string, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("TRADING_PAIRS must list at least one USDT spot pair")
+		return nil, fmt.Errorf("TRADING_PAIRS must list at least one USDT/USDC spot pair")
 	}
 	return out, nil
 }
+
+func (c Config) decisionSeconds() int {
+	if c.DecisionSeconds > 0 {
+		return c.DecisionSeconds
+	}
+	return 30
+}
+
+func (c Config) modelTimeout() time.Duration {
+	if c.ModelTimeoutSeconds > 0 {
+		return time.Duration(c.ModelTimeoutSeconds) * time.Second
+	}
+	return 20 * time.Second
+}
+
+func (c Config) cooldown() time.Duration {
+	if c.CooldownSeconds > 0 {
+		return time.Duration(c.CooldownSeconds) * time.Second
+	}
+	return time.Minute
+}
+
+func supportedQuote(quote string) bool { return quote == "USDT" || quote == "USDC" }
 
 func normalizePairList(pairs []string, single string) ([]string, error) {
 	if len(pairs) == 0 {

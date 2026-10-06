@@ -35,15 +35,17 @@ func testApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { repo.Close() })
 	a := &App{
+		// Explicit model mirrors the configured runtime default.
 		repo:          repo,
-		cfg:           Config{ControlToken: strings.Repeat("a", 24), MetricsToken: strings.Repeat("m", 24), MaxPosition: dec("100"), RiskPerTrade: dec("2.5"), DailyLoss: dec("10"), MaxPairs: 8, PerPairBudget: dec("1000"), Venue: paper(), AuditDays: 30, AuditMaxEvents: 100000},
-		state:         State{Venue: "paper", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Paused: true, Cash: dec("1000")}}},
+		cfg:           Config{ControlToken: strings.Repeat("a", 24), MetricsToken: strings.Repeat("m", 24), MaxPosition: dec("100"), RiskPerTrade: dec("2.5"), DailyLoss: dec("10"), MaxPairs: 8, PerPairBudget: dec("1000"), Venue: demo(), AuditDays: 30, AuditMaxEvents: 100000},
+		state:         State{Venue: "demo", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Paused: true, Cash: dec("1000")}}},
 		accountID:     "42",
 		symbols:       map[string]Symbol{"BTCUSDT": {Symbol: "BTCUSDT", Base: "BTC", Quote: "USDT", Step: dec("0.001"), MinQty: dec("0.001"), MinNotional: dec("5"), Tick: dec("0.01"), StopAllowed: true}},
 		feeds:         NewFeeds([]string{"BTCUSDT"}),
 		lastDecisions: map[string]any{},
 		metrics:       newMetrics(prometheus.NewRegistry()),
 	}
+	a.cfg.OllayaModel = "winnow:e4b"
 	market := a.feeds.markets["BTCUSDT"]
 	market.bid, market.ask, market.quoteAt, market.connected = dec("100"), dec("101"), time.Now(), true
 	return a
@@ -69,7 +71,7 @@ func TestPersistenceAndAudit(t *testing.T) {
 func TestOrderAccountingIdempotentAndFees(t *testing.T) {
 	a := testApp(t)
 	a.state.Pairs["BTCUSDT"].Pending = &Pending{ID: "buy", Side: "BUY", Qty: dec("1")}
-	a.binance = &Binance{venue: paper(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+	a.binance = &Binance{venue: demo(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 		return response(`[{"id":1,"orderId":1,"qty":"1","quoteQty":"100","commission":"0.001","commissionAsset":"BTC"}]`), nil
 	})}}
 	o := Order{OrderID: 1, ClientID: "buy", Status: "PARTIALLY_FILLED", Executed: "1", Quote: "100"}
@@ -97,7 +99,7 @@ func TestSubmissionPersistsBeforeNetworkAndNeverRetries(t *testing.T) {
 	a.state.Pairs["BTCUSDT"].Paused = false
 	a.state.Pairs["BTCUSDT"].Stop = dec("99")
 	orders := 0
-	a.binance = &Binance{venue: paper(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+	a.binance = &Binance{venue: demo(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/api/v3/account":
 			return response(`{"canTrade":true,"balances":[{"asset":"USDT","free":"10000"}]}`), nil
@@ -189,7 +191,7 @@ func TestPairsAreIndependent(t *testing.T) {
 	if a.state.Pairs["ETHUSDT"].Cash.String() != "1000" || a.state.Pairs["BTCUSDT"].Cash.String() != "1000" {
 		t.Fatal("cash not isolated")
 	}
-	if decisionCycleSeconds(1) != 5 || decisionCycleSeconds(3) != 15 {
+	if decisionCycleSeconds(1) != 30 || decisionCycleSeconds(3) != 90 {
 		t.Fatal("per-pair cycle should scale with pair count")
 	}
 }
@@ -207,7 +209,7 @@ func TestObserveOnlyAndTruncatedResponse(t *testing.T) {
 			a.cfg.OllayaURL = server.URL
 			cs := risingCandles(65)
 			a.feeds.markets["BTCUSDT"].candles = cs
-			a.binance = &Binance{venue: paper(), client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			a.binance = &Binance{venue: demo(), client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 				t.Fatal("unexpected trading call")
 				return nil, nil
 			})}}
@@ -219,10 +221,10 @@ func TestObserveOnlyAndTruncatedResponse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !truncated && len(events) != 1 {
-				t.Fatalf("expected audited decision, got %v", events)
+			if !truncated && (len(events) != 3 || events[0].Kind != "evaluation_outcome" || events[1].Kind != "decision" || events[2].Kind != "decision_candle") {
+				t.Fatalf("expected decision and outcome audits, got %d events", len(events))
 			}
-			if truncated && len(events) != 0 {
+			if truncated && (len(events) != 2 || events[0].Kind != "evaluation_outcome" || events[1].Kind != "decision_candle") {
 				t.Fatal("truncated decision accepted")
 			}
 		})
@@ -276,7 +278,7 @@ func TestProtectiveExitWhilePaused(t *testing.T) {
 	market := a.feeds.markets["BTCUSDT"]
 	market.bid, market.ask = dec("90"), dec("91")
 	orders := 0
-	a.binance = &Binance{venue: paper(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+	a.binance = &Binance{venue: demo(), key: "test", secret: "test", client: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/api/v3/account":
 			return response(`{"canTrade":true,"balances":[{"asset":"BTC","free":"1"}]}`), nil

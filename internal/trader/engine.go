@@ -2,17 +2,15 @@ package trader
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
 
-const decisionIntervalSeconds = 5
+const decisionIntervalSeconds = 30
 
 func decisionCycleSeconds(pairs int) int {
-	if pairs < 1 {
-		pairs = 1
-	}
-	return decisionIntervalSeconds * pairs
+	return decisionIntervalSeconds * max(1, pairs)
 }
 
 func (a *App) Run(ctx context.Context) {
@@ -23,14 +21,22 @@ func (a *App) Run(ctx context.Context) {
 		defer services.Done()
 		var workers sync.WaitGroup
 		defer workers.Wait()
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
+		lastHeartbeat := time.Now()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				a.dispatchPoll(ctx, &workers)
+				if time.Since(lastHeartbeat) >= 30*time.Second {
+					for pair, p := range a.snapshot().Pairs {
+						m := a.feeds.Snapshot(pair)
+						slog.Info("monitor heartbeat", "pair", pair, "quote_fresh", freshMarket(m, pair), "paused", p.Paused, "quantity", p.Qty.String(), "pending_order", p.Pending != nil, "native_stop", p.Protection != nil, "last_decision_candle", p.LastDecisionCandle)
+					}
+					lastHeartbeat = time.Now()
+				}
 			}
 		}
 	}()
@@ -53,21 +59,29 @@ func (a *App) Run(ctx context.Context) {
 		}
 	}()
 	defer services.Wait()
-	ticker := time.NewTicker(decisionIntervalSeconds * time.Second)
-	defer ticker.Stop()
+	interval := time.Duration(a.cfg.decisionSeconds()) * time.Second
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	index := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			pairs := a.snapshot().symbols()
 			if len(pairs) == 0 {
+				timer.Reset(interval)
 				continue
 			}
 			pair := pairs[index%len(pairs)]
 			index++
+			nextRequest := time.Now().Add(interval)
 			a.decide(ctx, pair)
+			delay := time.Until(nextRequest)
+			if delay < 0 {
+				delay = 0
+			}
+			timer.Reset(delay)
 		}
 	}
 }

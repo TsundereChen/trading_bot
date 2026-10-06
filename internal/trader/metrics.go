@@ -9,11 +9,14 @@ import (
 )
 
 type Metrics struct {
-	Latency                                                       *prometheus.HistogramVec
-	Decisions, Orders, Failures                                   *prometheus.CounterVec
-	Equity, Exposure, Running, FeedAge, WSConnected, ExternalFees *prometheus.GaugeVec
-	PortfolioEquity, PortfolioExposure                            prometheus.Gauge
-	WSReconnects                                                  *prometheus.CounterVec
+	Performance                                                       map[string]*prometheus.GaugeVec
+	LatestAction, LatestOutcome, LatestReason, EntryBlocker, FeeUnits *prometheus.GaugeVec
+	NoTrades                                                          *prometheus.CounterVec
+	Latency                                                           *prometheus.HistogramVec
+	Decisions, Orders, Failures                                       *prometheus.CounterVec
+	Equity, Exposure, Running, FeedAge, WSConnected, ExternalFees     *prometheus.GaugeVec
+	PortfolioEquity, PortfolioExposure                                prometheus.Gauge
+	WSReconnects                                                      *prometheus.CounterVec
 }
 
 func newMetrics(reg *prometheus.Registry) Metrics {
@@ -33,6 +36,7 @@ func newMetrics(reg *prometheus.Registry) Metrics {
 		PortfolioExposure: prometheus.NewGauge(prometheus.GaugeOpts{Name: "trader_portfolio_exposure_quote", Help: "Total exposure; NaN if any held pair lacks a fresh quote"}),
 	}
 	reg.MustRegister(m.Latency, m.Decisions, m.Orders, m.Failures, m.Equity, m.Exposure, m.Running, m.FeedAge, m.WSConnected, m.WSReconnects, m.ExternalFees, m.PortfolioEquity, m.PortfolioExposure)
+	m.registerPerformance(reg)
 	return m
 }
 
@@ -44,7 +48,16 @@ func (a *App) refreshMetrics() {
 		a.reconnectCounts = map[string]uint64{}
 	}
 	totalEquity, totalExposure := 0.0, 0.0
+	quoteAsset := ""
+	mixedQuotes := false
 	for pair, p := range a.state.Pairs {
+		quote := a.symbols[pair].Quote
+		if quoteAsset == "" {
+			quoteAsset = quote
+		}
+		if quote != "" && quoteAsset != quote {
+			mixedQuotes = true
+		}
 		m := a.feeds.Snapshot(pair)
 		fresh := freshMarket(m, pair)
 		connected, running, age := 0.0, 0.0, math.Inf(1)
@@ -58,9 +71,9 @@ func (a *App) refreshMetrics() {
 			running = 1
 		}
 		equity, exposure := p.equity(decimal.Zero).InexactFloat64(), 0.0
-		if p.Qty.IsPositive() {
+		if p.Qty.Add(p.DustQty).IsPositive() {
 			if fresh {
-				equity, exposure = p.equity(m.Bid).InexactFloat64(), p.Qty.Mul(m.Bid).InexactFloat64()
+				equity, exposure = p.equity(m.Bid).InexactFloat64(), p.Qty.Add(p.DustQty).Mul(m.Bid).InexactFloat64()
 			} else {
 				equity, exposure = math.NaN(), math.NaN()
 			}
@@ -68,6 +81,7 @@ func (a *App) refreshMetrics() {
 		if len(p.UnvaluedFees) > 0 {
 			equity = math.NaN()
 		}
+		a.publishPerformance(pair, quote, p, m, fresh, equity)
 		a.metrics.WSConnected.WithLabelValues(pair).Set(connected)
 		previous := a.reconnectCounts[pair]
 		delta := m.Reconnects
@@ -85,11 +99,21 @@ func (a *App) refreshMetrics() {
 		}
 		totalEquity, totalExposure = totalEquity+equity, totalExposure+exposure
 	}
+	if mixedQuotes {
+		totalEquity, totalExposure = math.NaN(), math.NaN()
+	}
 	a.metrics.PortfolioEquity.Set(totalEquity)
 	a.metrics.PortfolioExposure.Set(totalExposure)
 }
 
 func (a *App) removeMetrics(pair string) {
+	for _, g := range a.metrics.Performance {
+		g.DeletePartialMatch(prometheus.Labels{"pair": pair})
+	}
+	for _, g := range []*prometheus.GaugeVec{a.metrics.LatestAction, a.metrics.LatestOutcome, a.metrics.LatestReason, a.metrics.EntryBlocker, a.metrics.FeeUnits} {
+		g.DeletePartialMatch(prometheus.Labels{"pair": pair})
+	}
+	a.metrics.NoTrades.DeletePartialMatch(prometheus.Labels{"pair": pair})
 	for _, gauge := range []*prometheus.GaugeVec{a.metrics.Equity, a.metrics.Exposure, a.metrics.Running, a.metrics.FeedAge, a.metrics.WSConnected, a.metrics.ExternalFees} {
 		gauge.DeletePartialMatch(prometheus.Labels{"pair": pair})
 	}

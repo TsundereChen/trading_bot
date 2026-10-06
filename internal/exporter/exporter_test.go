@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExporterFreshnessAndCredentials(t *testing.T) {
@@ -41,5 +42,14 @@ func TestExporterFreshnessAndCredentials(t *testing.T) {
 	}
 	if body := request(); strings.Contains(body, "trader_equity_quote 1000") || !strings.Contains(body, "trader_exporter_up 0") {
 		t.Fatal("stale metrics served", body)
+	}
+}
+
+func TestExporterHidesExpiredSnapshot(t *testing.T) {
+	e := &Exporter{up: true, at: time.Now().Add(-16 * time.Second), body: []byte("trader_equity_quote 1000\n")}
+	w := httptest.NewRecorder()
+	e.routes().ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if strings.Contains(w.Body.String(), "trader_equity_quote 1000") || !strings.Contains(w.Body.String(), "trader_exporter_up 0") {
+		t.Fatal("expired bot metrics were presented as current")
 	}
 }

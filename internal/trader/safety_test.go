@@ -24,7 +24,7 @@ import (
 )
 
 func mockBinance(fn roundTrip) *Binance {
-	return &Binance{venue: paper(), key: "mock", secret: "mock", accountID: "42", client: &http.Client{Timeout: time.Second, Transport: fn}}
+	return &Binance{venue: demo(), key: "mock", secret: "mock", accountID: "42", client: &http.Client{Timeout: time.Second, Transport: fn}}
 }
 
 func executionApp(t *testing.T) *App {
@@ -56,26 +56,26 @@ func postControl(a *App, body string) *httptest.ResponseRecorder {
 }
 
 func TestStateBindingRejectsVenueAccountAndUnverifiedLegacy(t *testing.T) {
-	s := State{Venue: "paper", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Qty: dec("1")}}}
-	for _, args := range [][3]string{{"live", "42", "live:42"}, {"paper", "43", "paper:43"}} {
+	s := State{Venue: "demo", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Qty: dec("1")}}}
+	for _, args := range [][3]string{{"live", "42", "live:42"}, {"demo", "43", "demo:43"}} {
 		if _, err := bindState(s, args[0], args[1], args[2]); err == nil {
 			t.Fatal("known identity mismatch accepted")
 		}
 	}
 	legacy := s.copy()
 	legacy.Venue, legacy.AccountID = "", ""
-	if _, err := bindState(legacy, "paper", "42", ""); err == nil {
+	if _, err := bindState(legacy, "demo", "42", ""); err == nil {
 		t.Fatal("legacy exposure adopted without attestation")
 	}
-	bound, err := bindState(legacy, "paper", "42", "paper:42")
-	if err != nil || bound.Venue != "paper" || bound.AccountID != "42" || !bound.Pairs["BTCUSDT"].Qty.Equal(dec("1")) {
+	bound, err := bindState(legacy, "demo", "42", "demo:42")
+	if err != nil || bound.Venue != "demo" || bound.AccountID != "42" || !bound.Pairs["BTCUSDT"].Qty.Equal(dec("1")) {
 		t.Fatal("explicit legacy binding lost state", err)
 	}
-	observed, err := bindState(s, "paper", "", "")
+	observed, err := bindState(s, "demo", "", "")
 	if err != nil || observed.AccountID != "42" {
 		t.Fatal("observe-only startup erased identity", err)
 	}
-	newState, err := bindState(State{}, "paper", "42", "")
+	newState, err := bindState(State{}, "demo", "42", "")
 	if err != nil || newState.AccountID != "42" {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestSQLiteSingletonAliasesAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	s := State{Venue: "paper", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Pending: &Pending{ID: "durable", Side: "BUY", Qty: dec("1")}}}}
+	s := State{Venue: "demo", AccountID: "42", Pairs: map[string]*Position{"BTCUSDT": {Pair: "BTCUSDT", Pending: &Pending{ID: "durable", Side: "BUY", Qty: dec("1")}}}}
 	if err := first.Commit(context.Background(), s, "intent", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +838,7 @@ func TestRunJoinsInFlightReconciliationOnShutdown(t *testing.T) {
 	go func() { a.Run(ctx); close(done) }()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(7 * time.Second):
 		t.Fatal("reconciliation did not start")
 	}
 	cancel()

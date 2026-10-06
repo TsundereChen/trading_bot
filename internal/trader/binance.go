@@ -26,6 +26,7 @@ type Binance struct {
 	client      *http.Client
 	key, secret string
 	venue       Venue
+	interval    string
 	accountID   string // Verified at startup; immutable during a run.
 	rateMu      sync.Mutex
 	retryAt     time.Time
@@ -247,7 +248,7 @@ func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]strate
 		return nil, fmt.Errorf("candle limit must be 1-1000")
 	}
 	var raw [][]json.RawMessage
-	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {"1m"}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
+	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {signalInterval(b.interval)}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
 		return nil, err
 	}
 	result := []strategy.Candle{}
@@ -276,7 +277,7 @@ func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]strate
 		if err := strategy.ValidateCandle(c); err != nil {
 			return nil, err
 		}
-		if len(result) > 0 && c.CloseTime-result[len(result)-1].CloseTime != candleIntervalMS {
+		if len(result) > 0 && c.CloseTime-result[len(result)-1].CloseTime != candleDuration(b.interval).Milliseconds() {
 			return nil, fmt.Errorf("non-consecutive REST candles")
 		}
 		result = append(result, c)
@@ -408,7 +409,7 @@ func (b *Binance) Account(ctx context.Context) (Account, error) {
 func (b *Binance) CheckPermissions(ctx context.Context) error {
 	if !b.venue.Live {
 		return nil
-	} // Spot Testnet has no SAPI endpoints.
+	} // Demo Mode uses Spot /api endpoints, not live SAPI key restrictions.
 	var permissions struct {
 		EnableReading, EnableSpotAndMarginTrading, IpRestrict               *bool
 		EnableWithdrawals, EnableInternalTransfer, PermitsUniversalTransfer *bool

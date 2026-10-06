@@ -81,19 +81,36 @@ func (a *App) applyOrder(ctx context.Context, pair string, order Order, protecti
 		if dq.IsNegative() || dc.IsNegative() {
 			return fmt.Errorf("order totals moved backwards")
 		}
+		e := ensurePerformance(p)
+		for asset, fee := range deltas {
+			e.Fees[asset] = e.Fees[asset].Add(fee)
+		}
+		e.QuoteFees = e.QuoteFees.Add(qf)
+		if bf.IsPositive() && qty.IsPositive() {
+			e.BaseFeeEstimate = e.BaseFeeEstimate.Add(bf.Mul(quote.Div(qty)))
+		}
 		if pending.Side == "BUY" {
+			if dq.IsPositive() && e.Cycle == nil {
+				e.Cycle = &TradeCycle{CompleteHistory: p.Qty.IsZero(), RealizedStart: e.RealizedExecution, ExternalFeeStart: p.ExternalFeeQuote}
+			}
 			if bf.GreaterThan(p.Qty.Add(dq)) {
 				return fmt.Errorf("base fee exceeds acquired quantity")
 			}
 			p.Qty, p.Cost, p.Cash = p.Qty.Add(dq).Sub(bf), p.Cost.Add(dc).Add(qf), p.Cash.Sub(dc).Sub(qf)
+			if dq.IsPositive() && p.DustQty.IsPositive() {
+				p.Qty, p.Cost = p.Qty.Add(p.DustQty), p.Cost.Add(p.DustCost)
+				p.DustQty, p.DustCost = decimal.Zero, decimal.Zero
+			}
 		} else if pending.Side == "SELL" {
 			sold := dq.Add(bf)
 			if sold.GreaterThan(p.Qty) {
 				return fmt.Errorf("sell exceeds tracked position")
 			}
+			beforeCost := p.Cost
 			if p.Qty.IsPositive() {
 				p.Cost = p.Cost.Mul(p.Qty.Sub(sold)).Div(p.Qty)
 			}
+			e.RealizedExecution = e.RealizedExecution.Add(dc.Sub(qf).Sub(beforeCost.Sub(p.Cost)))
 			p.Qty, p.Cash = p.Qty.Sub(sold), p.Cash.Add(dc).Sub(qf)
 		} else {
 			return fmt.Errorf("invalid pending side")
@@ -119,13 +136,17 @@ func (a *App) applyOrder(ctx context.Context, pair string, order Order, protecti
 			} else {
 				p.Pending = nil
 			}
-			p.CooldownUntil = time.Now().Add(time.Minute)
+			p.CooldownUntil = time.Now().Add(a.cfg.cooldown())
+			if pending.Side == "SELL" {
+				retainDust(p, symbol)
+			}
 		}
 		// A BUY accepted with zero fills still needs its planned stop/target
 		// when later reconciliation discovers the execution.
 		if p.Qty.IsZero() && (p.Pending == nil || p.Pending.Side != "BUY") {
 			p.Cost, p.Stop, p.Target = decimal.Zero, decimal.Zero, decimal.Zero
 		}
+		finishTrade(p)
 		return nil
 	})
 }
@@ -136,7 +157,11 @@ func (a *App) valueExternalFees(ctx context.Context, pair string) error {
 		return nil
 	}
 	for asset, amount := range p.UnvaluedFees {
-		book, err := a.binance.Book(ctx, asset+"USDT")
+		symbol, ok := a.symbolFor(pair)
+		if !ok {
+			return fmt.Errorf("missing fee valuation quote asset")
+		}
+		book, err := a.binance.Book(ctx, asset+symbol.Quote)
 		if err != nil {
 			return err
 		}
@@ -151,6 +176,7 @@ func (a *App) valueExternalFees(ctx context.Context, pair string) error {
 			}
 			pos.ExternalFeeQuote = pos.ExternalFeeQuote.Add(amount.Mul(ask))
 			delete(pos.UnvaluedFees, asset)
+			finishTrade(pos)
 			return nil
 		}); err != nil {
 			return err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -17,8 +18,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const candleIntervalMS = 60000
-
 func freshMarket(m MarketSnapshot, pair string) bool {
 	age := time.Since(m.QuoteAt)
 	return m.Pair == pair && m.Connected && !m.QuoteAt.IsZero() && age >= 0 && age <= 3*time.Second && m.Bid.IsPositive() && !m.Ask.LessThan(m.Bid)
@@ -27,6 +26,7 @@ func freshMarket(m MarketSnapshot, pair string) bool {
 type Market struct {
 	mu         sync.RWMutex
 	pair       string
+	interval   string
 	bid, ask   decimal.Decimal
 	quoteAt    time.Time
 	candles    []strategy.Candle
@@ -52,15 +52,19 @@ type MarketSnapshot struct {
 // Feeds owns one Market per configured pair and keeps their subscriptions in
 // sync with the configured pair list.
 type Feeds struct {
-	mu      sync.RWMutex
-	markets map[string]*Market
-	pairs   []string
+	mu       sync.RWMutex
+	markets  map[string]*Market
+	pairs    []string
+	interval string
 }
 
-func NewFeeds(pairs []string) *Feeds {
+func NewFeeds(pairs []string, interval ...string) *Feeds {
 	f := &Feeds{markets: map[string]*Market{}, pairs: append([]string(nil), pairs...)}
+	if len(interval) > 0 {
+		f.interval = interval[0]
+	}
 	for _, pair := range pairs {
-		f.markets[pair] = &Market{pair: pair, done: make(chan struct{})}
+		f.markets[pair] = &Market{pair: pair, interval: f.interval, done: make(chan struct{})}
 	}
 	return f
 }
@@ -93,7 +97,7 @@ func (f *Feeds) SetPairs(pairs []string) {
 	for _, pair := range pairs {
 		wanted[pair] = true
 		if _, ok := f.markets[pair]; !ok {
-			f.markets[pair] = &Market{pair: pair, done: make(chan struct{})}
+			f.markets[pair] = &Market{pair: pair, interval: f.interval, done: make(chan struct{})}
 		}
 	}
 	for pair, market := range f.markets {
@@ -143,6 +147,7 @@ func (m *Market) message(pair string, payload []byte) error {
 		BidQty string `json:"B"`
 		AskQty string `json:"A"`
 		Kline  *struct {
+			Interval          string `json:"i"`
 			Closed            bool   `json:"x"`
 			OpenTime          int64  `json:"t"`
 			CloseTime         int64  `json:"T"`
@@ -169,6 +174,9 @@ func (m *Market) message(pair string, payload []byte) error {
 	}
 	if event.Kline != nil {
 		k := event.Kline
+		if k.Interval != "" && k.Interval != signalInterval(m.interval) {
+			return fmt.Errorf("stream candle interval mismatch")
+		}
 		if !k.Closed {
 			return nil
 		}
@@ -191,7 +199,7 @@ func (m *Market) message(pair string, payload []byte) error {
 			if c.CloseTime <= last {
 				return nil // duplicate or out-of-order update
 			}
-			if c.CloseTime-last != candleIntervalMS {
+			if c.CloseTime-last != candleDuration(m.interval).Milliseconds() {
 				return fmt.Errorf("candle gap; reconnect to resynchronize")
 			}
 		}
@@ -243,7 +251,7 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 	if err != nil {
 		return err
 	}
-	if _, err := features(cs); err != nil {
+	if _, err := features(cs, b.interval); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -258,6 +266,7 @@ func (m *Market) session(ctx context.Context, b *Binance, pair, endpoint string)
 	m.mu.Unlock()
 
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(90 * time.Second)) })
+	slog.Info("market feed connected", "pair", pair, "venue", b.venue.Name, "completed_candles", len(cs))
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -358,7 +367,7 @@ func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
 			return // pair removed
 		}
 		stream := strings.ToLower(pair)
-		endpoint := b.venue.StreamURL + "/stream?streams=" + stream + "@bookTicker/" + stream + "@kline_1m"
+		endpoint := b.venue.StreamURL + "/stream?streams=" + stream + "@bookTicker/" + stream + "@kline_" + signalInterval(f.interval)
 		started := time.Now()
 		err := market.session(ctx, b, pair, endpoint)
 		market.mu.Lock()
@@ -369,6 +378,9 @@ func (f *Feeds) runPair(ctx context.Context, b *Binance, pair string) {
 			market.lastError = err.Error()
 		}
 		market.mu.Unlock()
+		if ctx.Err() == nil {
+			slog.Warn("market feed disconnected", "pair", pair, "venue", b.venue.Name, "retry_in", backoff)
+		}
 		if time.Since(started) > time.Minute {
 			backoff = time.Second
 		}

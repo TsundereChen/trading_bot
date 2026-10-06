@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"reflect"
 	"sync"
 	"time"
 )
@@ -69,6 +69,7 @@ func (a *App) persist(ctx context.Context, next State, kind string, data any, pu
 		}
 		a.mu.Unlock()
 		a.metrics.Failures.WithLabelValues("storage").Inc()
+		slog.Error("state persistence failed; entries paused")
 		return err
 	}
 	a.mu.Lock()
@@ -77,6 +78,10 @@ func (a *App) persist(ctx context.Context, next State, kind string, data any, pu
 		publish()
 	}
 	a.mu.Unlock()
+	switch kind {
+	case "startup", "control", "order_intent", "order_rejected", "order_update", "native_stop_intent", "daily_loss_limit":
+		slog.Info("state committed", "event", kind, "version", next.Version)
+	}
 	return nil
 }
 
@@ -114,7 +119,7 @@ func (a *App) updateWith(ctx context.Context, kind string, data any, change func
 	}
 	next.Version = old.Version + 1
 	for pair, p := range next.Pairs {
-		if previous := old.Pairs[pair]; previous == nil || !reflect.DeepEqual(previous, p) {
+		if previous := old.Pairs[pair]; previous == nil || !executionPositionEqual(previous, p) {
 			p.Version = next.Version
 		}
 	}
@@ -122,6 +127,7 @@ func (a *App) updateWith(ctx context.Context, kind string, data any, change func
 }
 
 func (a *App) fail(ctx context.Context, pair, component string, err error) {
+	slog.Error("pair fault; entries paused", "pair", pair, "component", component)
 	a.metrics.Failures.WithLabelValues(component).Inc()
 	_ = a.update(ctx, "fault", map[string]string{"pair": pair, "component": component, "error": err.Error()}, func(s State) error {
 		changed := false

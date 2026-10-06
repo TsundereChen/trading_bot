@@ -21,35 +21,40 @@ type Pending struct {
 }
 
 type Position struct {
-	Pair             string                     `json:"pair"`
-	Version          uint64                     `json:"version"`
-	Paused           bool                       `json:"paused"`
-	Cash             decimal.Decimal            `json:"cash"`
-	Qty              decimal.Decimal            `json:"quantity"`
-	Cost             decimal.Decimal            `json:"cost"`
-	Stop             decimal.Decimal            `json:"stop"`
-	Target           decimal.Decimal            `json:"target"`
-	Pending          *Pending                   `json:"pending"`
-	Protection       *Pending                   `json:"native_stop"`
-	ExternalFees     map[string]decimal.Decimal `json:"external_fees,omitempty"`
-	UnvaluedFees     map[string]decimal.Decimal `json:"unvalued_fees,omitempty"`
-	ExternalFeeQuote decimal.Decimal            `json:"external_fee_quote_estimate"`
-	LastSetup        int64                      `json:"last_setup"`
-	Day              string                     `json:"day"`
-	DayEquity        decimal.Decimal            `json:"day_start_equity"`
-	CooldownUntil    time.Time                  `json:"cooldown_until"`
-	Error            string                     `json:"error"`
+	Performance        *Performance               `json:"performance,omitempty"`
+	DustQty            decimal.Decimal            `json:"dust_quantity"`
+	DustCost           decimal.Decimal            `json:"dust_cost"`
+	LastDecisionCandle int64                      `json:"last_decision_candle"`
+	Pair               string                     `json:"pair"`
+	Version            uint64                     `json:"version"`
+	Paused             bool                       `json:"paused"`
+	Cash               decimal.Decimal            `json:"cash"`
+	Qty                decimal.Decimal            `json:"quantity"`
+	Cost               decimal.Decimal            `json:"cost"`
+	Stop               decimal.Decimal            `json:"stop"`
+	Target             decimal.Decimal            `json:"target"`
+	Pending            *Pending                   `json:"pending"`
+	Protection         *Pending                   `json:"native_stop"`
+	ExternalFees       map[string]decimal.Decimal `json:"external_fees,omitempty"`
+	UnvaluedFees       map[string]decimal.Decimal `json:"unvalued_fees,omitempty"`
+	ExternalFeeQuote   decimal.Decimal            `json:"external_fee_quote_estimate"`
+	LastSetup          int64                      `json:"last_setup"`
+	Day                string                     `json:"day"`
+	DayEquity          decimal.Decimal            `json:"day_start_equity"`
+	CooldownUntil      time.Time                  `json:"cooldown_until"`
+	Error              string                     `json:"error"`
 }
 
 func (p Position) equity(bid decimal.Decimal) decimal.Decimal {
-	return p.Cash.Add(p.Qty.Mul(bid)).Sub(p.ExternalFeeQuote)
+	return p.Cash.Add(p.Qty.Add(p.DustQty).Mul(bid)).Sub(p.ExternalFeeQuote)
 }
 
 type State struct {
-	Venue     string               `json:"venue"`
-	AccountID string               `json:"account_id,omitempty"`
-	Version   uint64               `json:"version"`
-	Pairs     map[string]*Position `json:"pairs"`
+	Evaluations map[string]Evaluation `json:"evaluations,omitempty"`
+	Venue       string                `json:"venue"`
+	AccountID   string                `json:"account_id,omitempty"`
+	Version     uint64                `json:"version"`
+	Pairs       map[string]*Position  `json:"pairs"`
 }
 
 func copyDecimals(in map[string]decimal.Decimal) map[string]decimal.Decimal {
@@ -75,11 +80,24 @@ func copyPending(p *Pending) *Pending {
 func (s State) copy() State {
 	out := s
 	out.Pairs = make(map[string]*Position, len(s.Pairs))
+	out.Evaluations = make(map[string]Evaluation, len(s.Evaluations))
+	for pair, evaluation := range s.Evaluations {
+		out.Evaluations[pair] = evaluation
+	}
 	for pair, p := range s.Pairs {
 		if p == nil {
 			continue
 		}
 		clone := *p
+		if p.Performance != nil {
+			e := *p.Performance
+			e.Fees = copyDecimals(e.Fees)
+			if e.Cycle != nil {
+				c := *e.Cycle
+				e.Cycle = &c
+			}
+			clone.Performance = &e
+		}
 		clone.Pending, clone.Protection = copyPending(p.Pending), copyPending(p.Protection)
 		clone.ExternalFees, clone.UnvaluedFees = copyDecimals(p.ExternalFees), copyDecimals(p.UnvaluedFees)
 		out.Pairs[pair] = &clone
@@ -110,7 +128,7 @@ func bindState(s State, venue, accountID, confirmation string) (State, error) {
 	}
 	if accountID != "" && s.AccountID == "" {
 		for _, p := range s.Pairs {
-			if p != nil && (p.Qty.IsPositive() || p.Pending != nil || p.Protection != nil) && confirmation != venue+":"+accountID {
+			if p != nil && (p.Qty.IsPositive() || p.DustQty.IsPositive() || p.Pending != nil || p.Protection != nil) && confirmation != venue+":"+accountID {
 				return s, fmt.Errorf("existing exposure has no account binding; operator verification is required")
 			}
 		}

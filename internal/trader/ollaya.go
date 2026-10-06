@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -18,11 +19,15 @@ func (a *App) askOllaya(ctx context.Context, pair string, snapshot map[string]an
 		"regime":        map[string]any{"type": "choice", "instructions": "Classify market regime from supplied features.", "criteria": map[string]string{"UPTREND": "EMA20 above EMA50", "DOWNTREND": "EMA20 below EMA50", "RANGE": "No clear trend"}},
 		"setup_quality": map[string]any{"type": "score", "instructions": "Rate the match to the stated trend-pullback entry rules, not future profitability.", "criteria": []string{"Not eligible", "Weak", "Moderate", "Strong"}},
 	}
-	body, err := json.Marshal(map[string]any{"model": "winnow:e4b", "state": snapshot, "questions": questions, "keep_alive": "10m"})
+	if a.cfg.EntryPolicy == "ollaya" {
+		questions["action"] = map[string]any{"type": "choice", "instructions": "Choose only from allowed_actions. ENTER_LONG requires entry_eligible=true, but no EMA trend or pullback is mandatory. Judge whether supplied quotes and completed-candle features support a small long trade after spread and estimated fees. EXIT_LONG requires an existing tracked position; a trend reversal is not mandatory. HOLD when evidence is weak or costs outweigh the opportunity; do not trade simply to increase frequency. Model probabilities are not probabilities of profit.", "criteria": map[string]string{"ENTER_LONG": "Open a small eligible long", "EXIT_LONG": "Close the tracked long", "HOLD": "Wait; no order"}}
+		questions["setup_quality"] = map[string]any{"type": "score", "instructions": "Rate the evidence for a small long after estimated transaction costs, not the match to a required pullback and not guaranteed profitability.", "criteria": []string{"Poor", "Weak", "Moderate", "Strong"}}
+	}
+	body, err := json.Marshal(map[string]any{"model": a.cfg.OllayaModel, "state": snapshot, "questions": questions, "keep_alive": "10m"})
 	if err != nil {
 		return nil, err
 	}
-	inferCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	inferCtx, cancel := context.WithTimeout(ctx, a.cfg.modelTimeout())
 	defer cancel()
 	req, err := http.NewRequestWithContext(inferCtx, "POST", strings.TrimRight(a.cfg.OllayaURL, "/")+"/api/decide", bytes.NewReader(body))
 	if err != nil {
@@ -33,6 +38,7 @@ func (a *App) askOllaya(ctx context.Context, pair string, snapshot map[string]an
 		req.Header.Set("Authorization", "Bearer "+a.cfg.OllayaKey)
 	}
 	start, outcome := time.Now(), "error"
+	slog.Info("model request started", "pair", pair, "model", a.cfg.OllayaModel)
 	defer func() { a.metrics.Latency.WithLabelValues(outcome).Observe(time.Since(start).Seconds()) }()
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -57,8 +63,8 @@ type ollayaAnswer struct {
 	Answers   map[string]json.RawMessage `json:"answers"`
 }
 
-func validatedAction(result *ollayaAnswer) (string, bool) {
-	if result == nil || result.Truncated || result.Reason != "decide" || result.Model != "winnow:e4b" {
+func validatedAction(result *ollayaAnswer, expectedModel string) (string, bool) {
+	if expectedModel == "" || result == nil || result.Truncated || result.Reason != "decide" || result.Model != expectedModel {
 		return "", false
 	}
 	var action struct {

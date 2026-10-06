@@ -33,10 +33,13 @@ func checkQuantity(symbol Symbol, qty, bid, ask decimal.Decimal) error {
 
 func (a *App) checkEntryAllocation(p *Position, qty decimal.Decimal, m MarketSnapshot, freeQuote decimal.Decimal) error {
 	cost := qty.Mul(m.Ask).Mul(decimal.NewFromFloat(1.01))
-	if freeQuote.LessThan(cost) || p.Cash.Sub(p.ExternalFeeQuote).LessThan(cost) || qty.Mul(m.Ask).GreaterThan(a.cfg.MaxPosition) {
-		return fmt.Errorf("insufficient balance or position allocation exceeded")
+	if freeQuote.LessThan(cost) {
+		return fmt.Errorf("insufficient free quote balance")
 	}
-	if !p.Stop.LessThan(m.Bid) || qty.Mul(m.Ask.Sub(p.Stop)).GreaterThan(a.cfg.RiskPerTrade) {
+	if p.Cash.Sub(p.ExternalFeeQuote).LessThan(cost) || qty.Add(p.DustQty).Mul(m.Ask).GreaterThan(a.cfg.MaxPosition) {
+		return fmt.Errorf("position allocation exceeded")
+	}
+	if !p.Stop.LessThan(m.Bid) || qty.Add(p.DustQty).Mul(m.Ask.Sub(p.Stop)).GreaterThan(a.cfg.RiskPerTrade) {
 		return fmt.Errorf("entry-to-stop risk allocation exceeded")
 	}
 	return nil
@@ -50,7 +53,7 @@ func (a *App) submitLocked(ctx context.Context, pair, side string, qty decimal.D
 }
 
 // The pair gate is held, but no application-wide lock spans exchange I/O.
-func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.Decimal, reason string) error {
+func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.Decimal, reason string, observation ...*submissionObservation) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	if !a.executionAllowed() {
@@ -117,6 +120,9 @@ func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.D
 		}
 		return nil
 	})
+	if len(observation) > 0 {
+		observation[0].ClientID = id
+	}
 	if err != nil {
 		var local *preflightError
 		if definitiveRejection(err) || errors.As(err, &local) {
@@ -127,9 +133,15 @@ func (a *App) submitMarket(ctx context.Context, pair, side string, qty decimal.D
 			return err
 		}
 		a.metrics.Orders.WithLabelValues(pair, side, "uncertain").Inc()
+		if len(observation) > 0 {
+			observation[0].Uncertain = true
+		}
 		return fmt.Errorf("submission unresolved; reconciliation required: %w", err)
 	}
 	a.metrics.Orders.WithLabelValues(pair, side, "accepted").Inc()
+	if len(observation) > 0 {
+		observation[0].Accepted = true
+	}
 	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 	defer settleCancel()
 	if err := a.applyOrder(settleCtx, pair, order, false); err != nil {

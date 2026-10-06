@@ -9,15 +9,16 @@ import (
 )
 
 type BacktestInput struct {
-	Candles      []Candle        `json:"candles"`
-	Budget       decimal.Decimal `json:"budget"`
-	MaxPosition  decimal.Decimal `json:"max_position"`
-	RiskPerTrade decimal.Decimal `json:"risk_per_trade"`
-	DailyLoss    decimal.Decimal `json:"daily_loss_limit"`
-	FeeBps       *float64        `json:"fee_bps"`
-	SlippageBps  *float64        `json:"slippage_bps"`
-	QuantityStep decimal.Decimal `json:"quantity_step"`
-	MinNotional  decimal.Decimal `json:"min_notional"`
+	SignalInterval string          `json:"signal_interval"`
+	Candles        []Candle        `json:"candles"`
+	Budget         decimal.Decimal `json:"budget"`
+	MaxPosition    decimal.Decimal `json:"max_position"`
+	RiskPerTrade   decimal.Decimal `json:"risk_per_trade"`
+	DailyLoss      decimal.Decimal `json:"daily_loss_limit"`
+	FeeBps         *float64        `json:"fee_bps"`
+	SlippageBps    *float64        `json:"slippage_bps"`
+	QuantityStep   decimal.Decimal `json:"quantity_step"`
+	MinNotional    decimal.Decimal `json:"min_notional"`
 }
 type BacktestTrade struct {
 	EntryTime int64           `json:"entry_time_ms"`
@@ -48,6 +49,12 @@ type BacktestResult struct {
 }
 
 func backtestDefaults(input BacktestInput) (BacktestInput, error) {
+	if input.SignalInterval == "" {
+		input.SignalInterval = "1m"
+	}
+	if input.SignalInterval != "1m" && input.SignalInterval != "5m" {
+		return input, fmt.Errorf("signal_interval must be 1m or 5m")
+	}
 	for _, v := range []struct {
 		dst *decimal.Decimal
 		def string
@@ -88,15 +95,19 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 		return BacktestResult{}, err
 	}
 	cs := in.Candles
+	intervalMS := int64(60000)
+	if in.SignalInterval == "5m" {
+		intervalMS = 300000
+	}
 	if len(cs) < 61 || len(cs) > 50000 {
-		return BacktestResult{}, fmt.Errorf("provide 61–50000 consecutive completed 1-minute candles")
+		return BacktestResult{}, fmt.Errorf("provide 61–50000 consecutive completed %s candles", in.SignalInterval)
 	}
 	for i, c := range cs {
 		if err := ValidateCandle(c); err != nil {
 			return BacktestResult{}, fmt.Errorf("candle %d: %w", i, err)
 		}
-		if i > 0 && c.CloseTime-cs[i-1].CloseTime != 60000 {
-			return BacktestResult{}, fmt.Errorf("candles must be ordered, unique, and consecutive at 1-minute intervals")
+		if i > 0 && c.CloseTime-cs[i-1].CloseTime != intervalMS {
+			return BacktestResult{}, fmt.Errorf("candles must be ordered, unique, and consecutive at %s intervals", in.SignalInterval)
 		}
 	}
 	feeRate := decimal.NewFromFloat(*in.FeeBps).Div(decimal.NewFromInt(10000))
@@ -134,7 +145,7 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 		}
 		bar := cs[i]
 		open := decimal.NewFromFloat(bar.Open)
-		openAt := bar.CloseTime - 59999
+		openAt := bar.CloseTime - intervalMS + 1
 		equity := cash.Add(qty.Mul(open))
 		today := openAt / 86400000
 		if today != day {

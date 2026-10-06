@@ -29,7 +29,7 @@ func controlTargets(s State, pair string) ([]string, error) {
 
 func removablePairs(s State, requested []string) error {
 	for pair, p := range s.Pairs {
-		if !containsString(requested, pair) && (p.Qty.IsPositive() || p.Pending != nil || p.Protection != nil || len(p.UnvaluedFees) > 0) {
+		if !containsString(requested, pair) && (p.Qty.IsPositive() || p.DustQty.IsPositive() || p.Pending != nil || p.Protection != nil || len(p.UnvaluedFees) > 0) {
 			return fmt.Errorf("close and reconcile %s before removing it", pair)
 		}
 	}
@@ -66,8 +66,8 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 		symbols := map[string]Symbol{}
 		for _, name := range requested {
 			symbol, err := a.binance.Symbol(ctx, name)
-			if err != nil || symbol.Quote != "USDT" || (a.cfg.Trading && !symbol.StopAllowed) {
-				http.Error(w, "unsupported USDT spot/native-stop pair "+name, 400)
+			if err != nil || !supportedQuote(symbol.Quote) || (a.cfg.Trading && !symbol.StopAllowed) {
+				http.Error(w, "unsupported USDT/USDC spot/native-stop pair "+name, 400)
 				return
 			}
 			symbols[name] = symbol
@@ -79,11 +79,13 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 			for name := range s.Pairs {
 				if !containsString(requested, name) {
 					delete(s.Pairs, name)
+					delete(s.Evaluations, name)
 				}
 			}
 			for _, name := range requested {
 				if s.Pairs[name] == nil {
 					s.Pairs[name] = &Position{Pair: name, Paused: true, Cash: a.cfg.PerPairBudget}
+					ensurePerformance(s.Pairs[name])
 				}
 			}
 			return nil
@@ -151,7 +153,7 @@ func (a *App) control(w http.ResponseWriter, r *http.Request) {
 			}
 			if a.cfg.Trading {
 				symbol, ok := a.symbolFor(name)
-				if !ok || !symbol.StopAllowed || balances[symbol.Base].LessThan(p.Qty) {
+				if !ok || !symbol.StopAllowed || balances[symbol.Base].LessThan(p.Qty.Add(p.DustQty)) {
 					return fmt.Errorf("account or exchange rule reconciliation failed on %s", name)
 				}
 				if p.Qty.IsPositive() && (p.Protection == nil || p.Protection.OrderID == 0) {
