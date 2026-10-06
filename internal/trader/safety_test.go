@@ -1,4 +1,4 @@
-package main
+package trader
 
 import (
 	"context"
@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"automated-trader/internal/strategy"
 
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
@@ -669,8 +671,8 @@ func TestControlRejectsTrailingJSONAndBacktestHugeDecimals(t *testing.T) {
 	if w := postControl(a, `{"action":"start"} {"action":"pause"}`); w.Code != 400 {
 		t.Fatal("trailing command accepted")
 	}
-	input := BacktestInput{Candles: syntheticCandles(), Budget: dec("1e1000000")}
-	if _, err := Backtest(context.Background(), input); err == nil {
+	input := strategy.BacktestInput{Candles: syntheticCandles(), Budget: dec("1e1000000")}
+	if _, err := strategy.Backtest(context.Background(), input); err == nil {
 		t.Fatal("unbounded decimal accepted")
 	}
 }
@@ -858,7 +860,7 @@ func TestRunJoinsInFlightReconciliationOnShutdown(t *testing.T) {
 
 func eligibleExecutionApp(t *testing.T) *App {
 	a := executionApp(t)
-	cs := append([]Candle(nil), syntheticCandles()[:62]...)
+	cs := append([]strategy.Candle(nil), syntheticCandles()[:62]...)
 	now := time.Now().UnixMilli()
 	for i := range cs {
 		cs[i].CloseTime = now - int64(len(cs)-i)*60000

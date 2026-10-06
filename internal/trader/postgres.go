@@ -1,4 +1,4 @@
-package main
+package trader
 
 import (
 	"context"
@@ -20,6 +20,8 @@ type Postgres struct {
 	db    *sql.DB
 	lease *sql.Conn
 }
+
+var _ Repository = (*Postgres)(nil)
 
 func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	db, err := sql.Open("pgx", dsn)

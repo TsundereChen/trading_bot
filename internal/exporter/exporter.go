@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"context"
@@ -82,7 +82,9 @@ func (e *Exporter) routes() http.Handler {
 	})
 	return mux
 }
-func runExporter() error {
+
+// Run serves the metrics proxy until interrupted or its HTTP server fails.
+func Run() error {
 	token := os.Getenv("METRICS_TOKEN")
 	if len(token) < 24 {
 		return fmt.Errorf("exporter requires METRICS_TOKEN with at least 24 characters")
@@ -125,7 +127,9 @@ func runExporter() error {
 	}
 	return nil
 }
-func healthcheck() error {
+
+// Healthcheck probes the endpoint configured by HEALTHCHECK_URL.
+func Healthcheck() error {
 	client := http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(env("HEALTHCHECK_URL", "http://127.0.0.1:8080/healthz"))
 	if err != nil {
@@ -136,4 +140,11 @@ func healthcheck() error {
 		return fmt.Errorf("healthcheck HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func env(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

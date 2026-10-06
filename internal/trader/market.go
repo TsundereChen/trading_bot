@@ -1,14 +1,17 @@
-package main
+package trader
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"automated-trader/internal/strategy"
 
 	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
@@ -16,12 +19,17 @@ import (
 
 const candleIntervalMS = 60000
 
+func freshMarket(m MarketSnapshot, pair string) bool {
+	age := time.Since(m.QuoteAt)
+	return m.Pair == pair && m.Connected && !m.QuoteAt.IsZero() && age >= 0 && age <= 3*time.Second && m.Bid.IsPositive() && !m.Ask.LessThan(m.Bid)
+}
+
 type Market struct {
 	mu         sync.RWMutex
 	pair       string
 	bid, ask   decimal.Decimal
 	quoteAt    time.Time
-	candles    []Candle
+	candles    []strategy.Candle
 	connected  bool
 	reconnects uint64
 	lastError  string
@@ -31,14 +39,14 @@ type Market struct {
 }
 
 type MarketSnapshot struct {
-	Pair       string          `json:"pair"`
-	Bid        decimal.Decimal `json:"bid"`
-	Ask        decimal.Decimal `json:"ask"`
-	QuoteAt    time.Time       `json:"quote_received_at"`
-	Connected  bool            `json:"connected"`
-	Reconnects uint64          `json:"reconnects"`
-	Error      string          `json:"error"`
-	Candles    []Candle        `json:"-"`
+	Pair       string            `json:"pair"`
+	Bid        decimal.Decimal   `json:"bid"`
+	Ask        decimal.Decimal   `json:"ask"`
+	QuoteAt    time.Time         `json:"quote_received_at"`
+	Connected  bool              `json:"connected"`
+	Reconnects uint64            `json:"reconnects"`
+	Error      string            `json:"error"`
+	Candles    []strategy.Candle `json:"-"`
 }
 
 // Feeds owns one Market per configured pair and keeps their subscriptions in
@@ -62,16 +70,8 @@ func (f *Feeds) Pairs() []string {
 	defer f.mu.RUnlock()
 	out := make([]string, len(f.pairs))
 	copy(out, f.pairs)
-	sortStrings(out)
+	sort.Strings(out)
 	return out
-}
-
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
 }
 
 func (f *Feeds) Snapshot(pair string) MarketSnapshot {
@@ -122,7 +122,7 @@ func (m *Market) Snapshot() MarketSnapshot {
 	return MarketSnapshot{
 		Pair: m.pair, Bid: m.bid, Ask: m.ask, QuoteAt: m.quoteAt,
 		Connected: m.connected, Reconnects: m.reconnects, Error: m.lastError,
-		Candles: append([]Candle(nil), m.candles...),
+		Candles: append([]strategy.Candle(nil), m.candles...),
 	}
 }
 
@@ -172,7 +172,7 @@ func (m *Market) message(pair string, payload []byte) error {
 		if !k.Closed {
 			return nil
 		}
-		c := Candle{CloseTime: k.CloseTime}
+		c := strategy.Candle{CloseTime: k.CloseTime}
 		for _, item := range []struct {
 			value string
 			dst   *float64
@@ -183,7 +183,7 @@ func (m *Market) message(pair string, payload []byte) error {
 			}
 			*item.dst = v
 		}
-		if err := validateCandle(c); err != nil {
+		if err := strategy.ValidateCandle(c); err != nil {
 			return err
 		}
 		if len(m.candles) > 0 {

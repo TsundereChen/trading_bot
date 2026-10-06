@@ -74,6 +74,42 @@ Generate the control/metrics secrets and PostgreSQL password in `.env` before st
 
 Disconnected/stale held positions produce `NaN` equity/exposure instead of disappearing from portfolio totals. Missing quotes have infinite age; removed pairs lose their metrics series. Third-asset fee units are exposed separately. Gate alerts on feed freshness and exporter availability rather than treating missing valuations as zero.
 
+## Source layout
+
+This is a single-command Go module. The root `main.go` only dispatches the bot,
+exporter, backtest, and healthcheck commands; `go build -o trader .` and the
+container entry point remain unchanged.
+
+```text
+main.go                         CLI entry point
+internal/
+  exporter/                     Isolated Prometheus metrics proxy
+  strategy/                     Candle validation, indicators, decimal rules,
+                                and rule-only backtests
+  trader/
+    app.go, state.go            State ownership and durable publication
+    config.go, run.go           Configuration and startup/shutdown
+    http.go, control.go         Authenticated HTTP API
+    engine.go, poll.go          Scheduling and independent pair workers
+    decision.go, ollaya.go      Decision policy and model client
+    execution.go                Order preflight and submission
+    reconciliation.go           Fill and fee accounting
+    protection.go               Native-stop lifecycle
+    market.go, binance.go        Market feeds and exchange adapter
+    metrics.go                  Bot metrics and freshness
+    repository.go               Persistence contract
+    sqlite.go, postgres.go      Database adapters
+    lease_*.go                  Platform-specific SQLite ownership
+    migrations/postgres/        Embedded PostgreSQL migrations
+```
+
+Tests live beside the packages they exercise. The trading runtime deliberately
+keeps state, database adapters, and execution in one package so its locking and
+transaction details do not become a cross-package API. Strategy calculations
+are independent of the trading runtime; the exporter has no access to control
+or execution internals. Application-only packages stay under `internal/` rather
+than exposing a public library or introducing generic `utils` packages.
+
 ## Tests
 
 ```sh

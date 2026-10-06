@@ -1,4 +1,4 @@
-package main
+package trader
 
 import (
 	"context"
@@ -12,27 +12,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Repository keeps database-specific SQL out of trading and HTTP code.
-// A PostgreSQL adapter must preserve Commit's transaction boundary.
-type Repository interface {
-	Load(context.Context) (State, error)
-	Commit(context.Context, State, string, any) error
-	Events(context.Context) ([]Event, error)
-	Prune(context.Context, time.Time, int) error
-	Close() error
-}
-
-type Event struct {
-	ID   int64           `json:"id"`
-	Time string          `json:"time"`
-	Kind string          `json:"kind"`
-	Data json.RawMessage `json:"data"`
-}
-
 type SQLite struct {
 	db    *sql.DB
 	lease *os.File
 }
+
+var _ Repository = (*SQLite)(nil)
 
 func OpenSQLite(path string) (*SQLite, error) {
 	// The lock and SQLite must refer to exactly the same filesystem path.

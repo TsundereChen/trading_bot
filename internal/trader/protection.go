@@ -1,10 +1,12 @@
-package main
+package trader
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"time"
+
+	"automated-trader/internal/strategy"
 )
 
 // Native STOP_LOSS orders reserve the sellable quantity at Binance. Their
@@ -21,9 +23,9 @@ func (a *App) ensureProtection(ctx context.Context, pair string) error {
 	if !ok || !symbol.StopAllowed || !p.Stop.IsPositive() {
 		return fmt.Errorf("native STOP_LOSS is unavailable or stop is missing")
 	}
-	qty, stop := floorStep(p.Qty, symbol.Step), p.Stop
+	qty, stop := strategy.FloorStep(p.Qty, symbol.Step), p.Stop
 	if symbol.Tick.IsPositive() {
-		stop = floorStep(stop, symbol.Tick)
+		stop = strategy.FloorStep(stop, symbol.Tick)
 	}
 	if !stop.IsPositive() || stop.LessThan(symbol.MinPrice) || (symbol.MaxPrice.IsPositive() && stop.GreaterThan(symbol.MaxPrice)) {
 		return fmt.Errorf("stop outside exchange price limits")

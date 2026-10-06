@@ -2,8 +2,8 @@
 .env.*
 !.env.example
 data/
-trader
-automated-trader
+/trader
+/automated-trader
 bin/
 dist/
 secrets/

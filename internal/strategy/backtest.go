@@ -1,13 +1,9 @@
-package main
+package strategy
 
 import (
 	"context"
-	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
 	"math"
-	"os"
 
 	"github.com/shopspring/decimal"
 )
@@ -51,29 +47,12 @@ type BacktestResult struct {
 	Assumptions    []string        `json:"assumptions"`
 }
 
-func validateCandle(c Candle) error {
-	for _, v := range []float64{c.Open, c.High, c.Low, c.Close, c.Volume} {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return fmt.Errorf("candle values must be finite")
-		}
-	}
-	if c.CloseTime <= 0 || c.Low <= 0 || c.High < c.Low || c.Open < c.Low || c.Open > c.High || c.Close < c.Low || c.Close > c.High || c.Volume < 0 {
-		return fmt.Errorf("invalid candle OHLCV or timestamp")
-	}
-	return nil
-}
-
-// Reject oversized coefficients/exponents before comparisons can expand a
-// tiny JSON decimal into an enormous allocation.
-func boundedDecimal(d decimal.Decimal) bool {
-	return d.Exponent() >= -18 && d.Exponent() <= 18 && d.Coefficient().BitLen() <= 128
-}
 func backtestDefaults(input BacktestInput) (BacktestInput, error) {
 	for _, v := range []struct {
 		dst *decimal.Decimal
 		def string
 	}{{&input.Budget, "1000"}, {&input.MaxPosition, "100"}, {&input.RiskPerTrade, "2.5"}, {&input.DailyLoss, "10"}, {&input.QuantityStep, "0.00000001"}, {&input.MinNotional, "5"}} {
-		if !boundedDecimal(*v.dst) {
+		if !BoundedDecimal(*v.dst) {
 			return input, fmt.Errorf("backtest decimals exceed numeric limits")
 		}
 		if v.dst.IsZero() {
@@ -113,7 +92,7 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 		return BacktestResult{}, fmt.Errorf("provide 61–50000 consecutive completed 1-minute candles")
 	}
 	for i, c := range cs {
-		if err := validateCandle(c); err != nil {
+		if err := ValidateCandle(c); err != nil {
 			return BacktestResult{}, fmt.Errorf("candle %d: %w", i, err)
 		}
 		if i > 0 && c.CloseTime-cs[i-1].CloseTime != 60000 {
@@ -166,7 +145,7 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 		if dayEquity.Sub(equity).GreaterThanOrEqual(in.DailyLoss) {
 			blocked = true
 		}
-		f, err := calculateFeatures(cs[max(0, i-100):i])
+		f, err := CalculateFeatures(cs[max(0, i-100):i])
 		if err != nil {
 			return BacktestResult{}, err
 		}
@@ -185,7 +164,7 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 			distance := decimal.NewFromFloat(f.ATR * 1.5)
 			q := decimal.Min(in.MaxPosition.Div(entry), in.RiskPerTrade.Div(distance))
 			q = decimal.Min(q, cash.Div(entry.Mul(decimal.NewFromInt(1).Add(decimal.Max(feeRate, decimal.NewFromFloat(.01))))))
-			q = floorStep(q, in.QuantityStep)
+			q = FloorStep(q, in.QuantityStep)
 			if q.IsPositive() && q.Mul(entry).GreaterThanOrEqual(in.MinNotional) && entry.Sub(distance).IsPositive() {
 				gross := q.Mul(entry)
 				entryFee := gross.Mul(feeRate)
@@ -229,33 +208,4 @@ func Backtest(ctx context.Context, input BacktestInput) (BacktestResult, error) 
 		result.WinRate = float64(wins) / float64(len(result.Trades))
 	}
 	return result, nil
-}
-func runBacktestCLI(args []string) error {
-	flags := flag.NewFlagSet("backtest", flag.ContinueOnError)
-	path := flags.String("input", "-", "JSON input path or - for stdin")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	var reader io.Reader = os.Stdin
-	if *path != "-" {
-		f, err := os.Open(*path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		reader = f
-	}
-	decoder := json.NewDecoder(io.LimitReader(reader, 8<<20))
-	decoder.DisallowUnknownFields()
-	var input BacktestInput
-	if err := decoder.Decode(&input); err != nil {
-		return err
-	}
-	result, err := Backtest(context.Background(), input)
-	if err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
 }

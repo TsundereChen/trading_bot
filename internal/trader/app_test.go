@@ -1,4 +1,4 @@
-package main
+package trader
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"automated-trader/internal/strategy"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/shopspring/decimal"
@@ -45,14 +47,6 @@ func testApp(t *testing.T) *App {
 	market := a.feeds.markets["BTCUSDT"]
 	market.bid, market.ask, market.quoteAt, market.connected = dec("100"), dec("101"), time.Now(), true
 	return a
-}
-
-func TestFloorStep(t *testing.T) {
-	for _, c := range []struct{ q, step, want string }{{"1.239", "0.01", "1.23"}, {"1.239", "0.05", "1.2"}, {"0.009", "0.01", "0"}} {
-		if got := floorStep(dec(c.q), dec(c.step)); !got.Equal(dec(c.want)) {
-			t.Fatalf("%s / %s: %s", c.q, c.step, got)
-		}
-	}
 }
 
 func TestPersistenceAndAudit(t *testing.T) {
@@ -235,12 +229,12 @@ func TestObserveOnlyAndTruncatedResponse(t *testing.T) {
 	}
 }
 
-func risingCandles(n int) []Candle {
-	cs := []Candle{}
+func risingCandles(n int) []strategy.Candle {
+	cs := []strategy.Candle{}
 	now := time.Now().UnixMilli()
 	for i := 0; i < n; i++ {
 		price := 100 + float64(i)
-		cs = append(cs, Candle{CloseTime: now - int64(n-i)*60000, Open: price, High: price + 2, Low: price - 2, Close: price, Volume: 10})
+		cs = append(cs, strategy.Candle{CloseTime: now - int64(n-i)*60000, Open: price, High: price + 2, Low: price - 2, Close: price, Volume: 10})
 	}
 	return cs
 }

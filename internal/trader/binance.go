@@ -1,4 +1,4 @@
-package main
+package trader
 
 import (
 	"context"
@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"automated-trader/internal/strategy"
 
 	"github.com/shopspring/decimal"
 )
@@ -240,14 +242,7 @@ func (b *Binance) Book(ctx context.Context, pair string) (Book, error) {
 	return book, err
 }
 
-type Candle struct {
-	CloseTime                      int64 `json:"close_time"`
-	Open, High, Low, Close, Volume float64
-}
-
-const decisionIntervalSeconds = 5
-
-func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]Candle, error) {
+func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]strategy.Candle, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("candle limit must be 1-1000")
 	}
@@ -255,12 +250,12 @@ func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]Candle
 	if err := b.request(ctx, "GET", "/api/v3/klines", url.Values{"symbol": {pair}, "interval": {"1m"}, "limit": {strconv.Itoa(limit)}}, false, &raw); err != nil {
 		return nil, err
 	}
-	result := []Candle{}
+	result := []strategy.Candle{}
 	for _, row := range raw {
 		if len(row) < 7 {
 			return nil, fmt.Errorf("invalid candle")
 		}
-		var c Candle
+		var c strategy.Candle
 		if err := json.Unmarshal(row[6], &c.CloseTime); err != nil {
 			return nil, err
 		}
@@ -278,7 +273,7 @@ func (b *Binance) Candles(ctx context.Context, pair string, limit int) ([]Candle
 			}
 			*p = v
 		}
-		if err := validateCandle(c); err != nil {
+		if err := strategy.ValidateCandle(c); err != nil {
 			return nil, err
 		}
 		if len(result) > 0 && c.CloseTime-result[len(result)-1].CloseTime != candleIntervalMS {
@@ -465,9 +460,4 @@ func (b *Binance) balances(ctx context.Context, includeLocked bool) (map[string]
 		}
 	}
 	return balances, nil
-}
-
-func floorStep(q, step decimal.Decimal) decimal.Decimal {
-	quotient, _ := q.QuoRem(step, 0)
-	return quotient.Mul(step)
 }
